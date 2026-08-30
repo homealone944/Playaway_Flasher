@@ -112,6 +112,30 @@ python playaway_studio.py fetch-encoder
 
 ---
 
+### 3. 📚 Calibre Plugin (Direct Library Integration)
+
+Flash audiobooks directly from your **Calibre** library with one click!
+
+#### 📦 Download & Installation:
+1. **Download the Plugin**:
+   - Download the latest **[`Playaway_Flasher.zip`](https://github.com/homealone944/Playaway_Flasher/releases)** from the [GitHub Releases](https://github.com/homealone944/Playaway_Flasher/releases) page.
+   - *Or build from source*: Run `python calibre_plugin/build_plugin.py` to generate `dist/Playaway_Flasher.zip`.
+
+2. **Install into Calibre**:
+   - Open **Calibre** $\rightarrow$ Click **Preferences** (<kbd>Ctrl</kbd>+<kbd>P</kbd>) $\rightarrow$ **Plugins** (under *Advanced*).
+   - Click the **"Load plugin from file"** button in the bottom right.
+   - Select `Playaway_Flasher.zip`.
+   - Click **Yes** on the security warning and **restart Calibre**.
+
+3. **Usage in Calibre**:
+   - Select an audiobook in your Calibre library (with an attached `.m4b`, `.mp3`, `.m4a`, `.flac`, `.wav`, etc.).
+   - **⚡ 1-Click Quick Flash**: Click **"Playaway Flash"** on your toolbar (or press <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd>) to instantly wipe and flash using your saved defaults!
+   - **🎛️ Custom Flash Studio**: Click the dropdown arrow on the toolbar button $\rightarrow$ **"🎛️ Custom Flash (Interactive Setup)..."** to scrub chapter timestamps, fine-tune splits, adjust speeds, and manually set bitrates.
+   - **⚙️ Plugin Settings**: Configure global defaults (fixed split minutes, chapter tags, playback speed, pitch preservation, and silence tracks) via the dropdown menu or Calibre's Plugin Preferences.
+   - **📖 Help Guide**: Access the built-in hardware wiring guide, pinouts, and firmware bug documentation directly from the toolbar dropdown.
+
+---
+
 ## 📌 Critical Gotchas & Storage Reference
 
 1. **Mono Audio**: Playaway hardware *only* plays mono audio. Stereo audio will cause the player to skip tracks silently. The tool automatically forces mono conversion.
@@ -132,8 +156,10 @@ python playaway_studio.py fetch-encoder
 - `playaway_studio.py`: Main launcher supporting GUI mode and CLI subcommands.
 - `playaway_gui.py`: Dark-themed Tkinter GUI desktop window interface with embedded LibVLC media player suite.
 - `playaway_core.py`: Core processing engine (drive detection, audio conversion, chapter planner, PATWEAKS generator, flasher).
+- `calibre_plugin/`: Native Calibre plugin integration (UI actions, Qt dialogs, packaging builder).
 - `fetch_encoder.py`: Automated setup helper for official 3GPP AMR-WB+ encoder binaries.
 - `tools/`: Directory holding `encoder.exe` and `er-libisomedia.dll`.
+- `dist/`: Directory containing built `Playaway_Flasher.zip` Calibre plugin package.
 
 ---
 
