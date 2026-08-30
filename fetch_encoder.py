@@ -6,25 +6,87 @@ Locates or downloads encoder.exe and er-libisomedia.dll required for Playaway au
 
 import os
 import sys
-import shutil
 import urllib.request
 import zipfile
 import io
 from pathlib import Path
 
-APP_DIR = Path(__file__).parent.resolve()
-TOOLS_DIR = APP_DIR / "tools"
+def get_tools_dir():
+    """Return a safe, writable directory for encoder binaries that works in Calibre and standalone."""
+    try:
+        p = Path(__file__).parent.resolve()
+        # If running from normal folder outside of a zip
+        if p.is_dir() and not str(p).lower().endswith(".zip"):
+            return p / "tools"
+    except Exception:
+        pass
 
-OFFICIAL_3GPP_ZIP_URL = "https://www.3gpp.org/ftp/Specs/archive/26_series/26.304/26304-f00.zip"
+    app_data = os.environ.get("APPDATA")
+    if app_data:
+        return Path(app_data) / "calibre" / "plugins" / "playaway_tools"
+    return Path.home() / ".playaway" / "tools"
+
+
+def extract_bundled_tools(target_dir):
+    """Extract encoder.exe and er-libisomedia.dll if running inside Calibre plugin zip."""
+    exe_target = target_dir / "encoder.exe"
+    dll_target = target_dir / "er-libisomedia.dll"
+    if exe_target.is_file() and dll_target.is_file():
+        return exe_target, dll_target
+
+    # Search for containing zip file
+    try:
+        p = Path(__file__).resolve()
+        for parent_candidate in [p, p.parent, p.parent.parent]:
+            candidate_str = str(parent_candidate)
+            if ".zip" in candidate_str.lower():
+                # Extract zip path up to .zip
+                idx = candidate_str.lower().find(".zip") + 4
+                actual_zip = Path(candidate_str[:idx])
+                if actual_zip.is_file() and zipfile.is_zipfile(actual_zip):
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    with zipfile.ZipFile(actual_zip, "r") as zf:
+                        for name in zf.namelist():
+                            if name.endswith("encoder.exe"):
+                                with open(exe_target, "wb") as f:
+                                    f.write(zf.read(name))
+                            elif name.endswith("er-libisomedia.dll"):
+                                with open(dll_target, "wb") as f:
+                                    f.write(zf.read(name))
+                    if exe_target.is_file() and dll_target.is_file():
+                        return exe_target, dll_target
+    except Exception:
+        pass
+
+    return None, None
 
 
 def find_encoder():
     """
-    Search for encoder executable in APP_DIR, TOOLS_DIR, or PATH.
+    Search for encoder executable in safe tools directory, APP_DIR, or PATH.
     Returns tuple (encoder_path, dll_path) or (None, None).
     """
-    search_paths = [APP_DIR, TOOLS_DIR]
+    tools_dir = get_tools_dir()
     
+    # Try extracting bundled tools if available
+    extracted_exe, extracted_dll = extract_bundled_tools(tools_dir)
+    if extracted_exe and extracted_dll:
+        return extracted_exe, extracted_dll
+
+    search_paths = [tools_dir]
+    
+    try:
+        curr_dir = Path(__file__).parent.resolve()
+        if curr_dir.is_dir() and not str(curr_dir).lower().endswith(".zip"):
+            search_paths.append(curr_dir)
+            search_paths.append(curr_dir / "tools")
+    except Exception:
+        pass
+
+    # Include user's project workspace directory
+    search_paths.append(Path(r"C:\Users\risin\Documents\In_Progress\Coding\Playaway_Installer\tools"))
+    search_paths.append(Path(r"C:\Users\risin\Documents\In_Progress\Coding\Playaway_Installer"))
+
     path_dirs = [Path(p) for p in os.environ.get("PATH", "").split(os.pathsep) if p]
     search_paths.extend(path_dirs)
 
@@ -35,7 +97,10 @@ def find_encoder():
     found_dll = None
 
     for p in search_paths:
-        if not p.exists():
+        try:
+            if not p.exists():
+                continue
+        except Exception:
             continue
         
         exe_path = p / "encoder.exe"
@@ -49,10 +114,8 @@ def find_encoder():
             dll_path = exe_path.parent / "er-libisomedia.dll"
             if dll_path.is_file():
                 found_dll = dll_path
-            elif (TOOLS_DIR / "er-libisomedia.dll").is_file():
-                found_dll = TOOLS_DIR / "er-libisomedia.dll"
-            elif (APP_DIR / "er-libisomedia.dll").is_file():
-                found_dll = APP_DIR / "er-libisomedia.dll"
+            elif (tools_dir / "er-libisomedia.dll").is_file():
+                found_dll = tools_dir / "er-libisomedia.dll"
             break
 
     return found_encoder, found_dll
@@ -104,20 +167,14 @@ def setup_encoder(force_redownload=False):
     Ensure the 3GPP encoder is present. Downloads binaries if missing.
     Returns (encoder_path, dll_path).
     """
-    TOOLS_DIR.mkdir(parents=True, exist_ok=True)
     enc, dll = find_encoder()
 
     if enc and dll and not force_redownload:
-        print(f"Found existing 3GPP encoder: {enc}")
         return enc, dll
 
-    print("\n=== Playaway 3GPP AMR-WB+ Encoder Downloader ===")
-    try:
-        return download_and_extract_3gpp_encoder(TOOLS_DIR)
-    except Exception as e:
-        print(f"\n[!] Automatic download failed: {e}")
-        print(f"Please manually place 'encoder.exe' and 'er-libisomedia.dll' into:\n    {TOOLS_DIR}")
-        return None, None
+    tools_dir = get_tools_dir()
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    return download_and_extract_3gpp_encoder(tools_dir)
 
 
 

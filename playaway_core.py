@@ -15,7 +15,14 @@ import time
 import re
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from fetch_encoder import find_encoder, setup_encoder
+
+try:
+    from calibre_plugins.playaway_flasher.fetch_encoder import setup_encoder
+except (ImportError, ValueError):
+    try:
+        from .fetch_encoder import setup_encoder
+    except (ImportError, ValueError):
+        from fetch_encoder import setup_encoder
 
 
 def run_command(cmd, log_callback=None):
@@ -442,6 +449,35 @@ def plan_chapters(input_path, split_mode="duration", split_mins=15, title="Audio
     return segments
 
 
+MAX_SAFE_TRACK_MINS = 88.0  # Firmware 01:03 freeze limit (~1 hour 28 minutes)
+
+
+def check_track_duration_warnings(segments, speed=1.0, max_mins=MAX_SAFE_TRACK_MINS):
+    """
+    Inspect planned segments and return a list of warning dicts for any
+    active track whose speed-adjusted duration exceeds max_mins (88 mins).
+    Returns: [{'index': 1, 'title': '...', 'raw_mins': 95.0, 'effective_mins': 95.0, 'out_name': '...'}]
+    """
+    warnings = []
+    eff_speed = max(0.25, float(speed))
+    for idx, seg in enumerate(segments, 1):
+        if seg.get("excluded", False) or seg.get("is_silence", False) or seg.get("file") == "__SILENCE__":
+            continue
+        raw_dur_sec = float(seg.get("duration", 0.0))
+        eff_dur_sec = raw_dur_sec / eff_speed
+        eff_dur_mins = round(eff_dur_sec / 60.0, 1)
+        if eff_dur_mins > max_mins:
+            warnings.append({
+                "index": idx,
+                "title": seg.get("title", f"Track {idx}"),
+                "raw_mins": round(raw_dur_sec / 60.0, 1),
+                "effective_mins": eff_dur_mins,
+                "out_name": seg.get("out_name", "")
+            })
+    return warnings
+
+
+
 # ==============================================================================
 # Audio Encoding Engine (FFmpeg -> 3GPP AMR-WB+)
 # ==============================================================================
@@ -584,6 +620,9 @@ def convert_all_segments_parallel(segments, output_dir, bitrate_kbps=10, speed=1
     total = len(segments)
     start_time = time.time()
 
+    if progress_callback:
+        progress_callback(0, total, "Starting...", "")
+
     def process_task(item):
         idx, seg = item
         if cancel_event and cancel_event.is_set():
@@ -618,11 +657,9 @@ def convert_all_segments_parallel(segments, output_dir, bitrate_kbps=10, speed=1
                 rate = completed / max(0.001, elapsed)  # tracks / sec
                 remaining_tracks = total - completed
                 eta_sec = remaining_tracks / rate if rate > 0 else 0
-                eta_str = f"~{format_eta(eta_sec)}" if completed >= 2 else "Estimating..."
+                eta_str = f"~{format_eta(eta_sec)}" if completed >= 2 else "Calculating..."
                 track_time_str = f"{track_dur:.1f}s" if track_dur < 60 else format_duration(track_dur)
 
-                if log_callback:
-                    log_callback(f"[{completed}/{total}] Encoded: {segments[idx]['out_name']} | Track Time: {track_time_str} | ETA: {eta_str}")
                 if progress_callback:
                     progress_callback(completed, total, eta_str, track_time_str)
             except Exception as e:
@@ -795,7 +832,8 @@ DEFAULT_SETTINGS = {
     "subchapter_mode": False,
     "playback_speed": 1.0,
     "preserve_pitch": True,
-    "bitrate_kbps": 10
+    "bitrate_kbps": 10,
+    "final_chapter_silence": True
 }
 
 def load_config(config_path=None):

@@ -8,9 +8,9 @@ import os
 import sys
 import time
 import threading
-import tempfile
 import subprocess
 import re
+import ctypes
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
@@ -26,7 +26,8 @@ from playaway_core import (
     detect_playaway_drives,
     inspect_audio_source,
     plan_chapters,
-    convert_segment_to_awb,
+    check_track_duration_warnings,
+    MAX_SAFE_TRACK_MINS,
     convert_all_segments_parallel,
     generate_patweaks_content,
     flash_playaway,
@@ -35,35 +36,13 @@ from playaway_core import (
     generate_copy_instructions,
     estimate_bitrate_size,
     calculate_autofit_bitrate,
+    build_speed_filter as build_atempo_filter,
     format_duration,
     load_config,
     save_config,
-    DEFAULT_SETTINGS,
-    run_command
+    DEFAULT_SETTINGS
 )
 from fetch_encoder import setup_encoder, find_encoder
-
-
-def build_atempo_filter(speed: float) -> str:
-    """Build FFmpeg filter graph string for any speed value (0.25x to 4.0x)."""
-    try:
-        spd = float(speed)
-    except (ValueError, TypeError):
-        spd = 1.0
-
-    if abs(spd - 1.0) < 0.01:
-        return "anull"
-    
-    filters = []
-    curr = spd
-    while curr > 2.0:
-        filters.append("atempo=2.0")
-        curr /= 2.0
-    while curr < 0.5:
-        filters.append("atempo=0.5")
-        curr /= 0.5
-    filters.append(f"atempo={curr:.4f}")
-    return ",".join(filters)
 
 
 class PlayawayStudioGUI(tk.Tk):
@@ -71,6 +50,7 @@ class PlayawayStudioGUI(tk.Tk):
         super().__init__()
 
         self.title("Playaway Audiobook Studio & Flasher")
+        self.setup_window_icon()
 
         # Dynamically set window height to full display height (minus taskbar margin)
         self.update_idletasks()
@@ -91,6 +71,7 @@ class PlayawayStudioGUI(tk.Tk):
         self.book_title = tk.StringVar(value="My Audiobook")
         self.split_mode = tk.StringVar(value=cfg.get("split_mode", "duration"))
         self.split_mins = tk.IntVar(value=cfg.get("split_mins", 15))
+        self.split_mins.trace_add("write", lambda *a: self.after_idle(self.on_split_mins_changed))
         self.subchapter_mode = tk.BooleanVar(value=cfg.get("subchapter_mode", False))
         cfg_bit = cfg.get("bitrate_kbps", "auto")
         if str(cfg_bit).lower() == "auto":
@@ -241,6 +222,36 @@ class PlayawayStudioGUI(tk.Tk):
             background=[("active", "#45475a"), ("readonly", "#313244")]
         )
 
+        # Spinbox & Entry Styling for High Contrast in Dark Mode
+        self.style.configure("TSpinbox",
+            fieldbackground="#313244",
+            background="#313244",
+            foreground="#cdd6f4",
+            darkcolor="#313244",
+            lightcolor="#313244",
+            bordercolor="#89b4fa",
+            arrowcolor="#89b4fa",
+            font=("Segoe UI", 10, "bold"),
+            padding=[4, 2]
+        )
+        self.style.map("TSpinbox",
+            fieldbackground=[("focus", "#45475a"), ("active", "#45475a"), ("disabled", "#181825")],
+            foreground=[("disabled", "#6c7086")],
+            background=[("active", "#45475a")]
+        )
+        self.style.configure("TEntry",
+            fieldbackground="#313244",
+            background="#313244",
+            foreground="#cdd6f4",
+            bordercolor="#45475a",
+            font=("Segoe UI", 10),
+            padding=[4, 2]
+        )
+        self.style.map("TEntry",
+            fieldbackground=[("focus", "#45475a"), ("disabled", "#181825")],
+            foreground=[("disabled", "#6c7086")]
+        )
+
         # Treeview Styling & Heading Styles
         self.style.configure("Treeview",
             background="#11111b",
@@ -278,6 +289,32 @@ class PlayawayStudioGUI(tk.Tk):
             foreground=[("selected", "#11111b"), ("active", "#ffffff")],
             expand=[("selected", [1, 2, 1, 0])]
         )
+
+    def setup_window_icon(self):
+        """Set the window and taskbar icon to match the Calibre plugin icon."""
+        # Decouple process from default python.exe icon on Windows taskbar
+        if sys.platform == "win32":
+            try:
+                myappid = "homealone944.playaway.studio.flasher.1.0"
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            except Exception:
+                pass
+
+        base_dir = Path(__file__).parent
+        icon_paths = [
+            base_dir / "calibre_plugin" / "images" / "icon.png",
+            base_dir / "calibre_plugin" / "icon.png",
+            base_dir / "resources" / "icon.png",
+            base_dir / "images" / "icon.png",
+        ]
+        for icon_path in icon_paths:
+            if icon_path.exists():
+                try:
+                    self._app_icon = tk.PhotoImage(file=str(icon_path))
+                    self.iconphoto(True, self._app_icon)
+                    break
+                except Exception as e:
+                    print(f"Window icon loading note: {e}")
 
     def create_widgets(self):
         # Header Banner
@@ -397,9 +434,22 @@ class PlayawayStudioGUI(tk.Tk):
 
         dur_subframe = ttk.Frame(col1, style="Card.TFrame")
         dur_subframe.pack(anchor="w", padx=16, pady=1)
-        sp_mins = ttk.Spinbox(dur_subframe, from_=1, to=120, textvariable=self.split_mins, width=4, command=self.update_estimates)
-        sp_mins.pack(side="left", padx=(0, 4))
-        ttk.Label(dur_subframe, text="mins", style="Card.TLabel").pack(side="left")
+        self.sp_mins = ttk.Spinbox(
+            dur_subframe,
+            from_=1,
+            to=180,
+            textvariable=self.split_mins,
+            width=5,
+            font=("Segoe UI", 10, "bold"),
+            command=self.on_split_mins_changed
+        )
+        self.sp_mins.pack(side="left", padx=(0, 4))
+        self.sp_mins.bind("<Return>", lambda e: self.on_split_mins_changed())
+        self.sp_mins.bind("<KP_Enter>", lambda e: self.on_split_mins_changed())
+        self.sp_mins.bind("<KeyRelease>", lambda e: self.on_split_mins_changed())
+        self.sp_mins.bind("<FocusOut>", lambda e: self.on_split_mins_changed())
+        self.sp_mins.bind("<Button-1>", lambda e: self.split_mode.set("duration"))
+        ttk.Label(dur_subframe, text="mins per track", style="Card.TLabel", font=("Segoe UI", 9)).pack(side="left")
 
         rb_chap = ttk.Radiobutton(col1, text="Split by chapter tags", variable=self.split_mode, value="chapters", command=self.update_estimates)
         rb_chap.pack(anchor="w", pady=2)
@@ -462,7 +512,10 @@ class PlayawayStudioGUI(tk.Tk):
         info_frame = self.info_frame
 
         self.stats_label = ttk.Label(info_frame, text="No audiobook loaded.", style="Card.TLabel", font=("Segoe UI", 9, "bold"))
-        self.stats_label.pack(anchor="w", pady=(0, 4))
+        self.stats_label.pack(anchor="w", pady=(0, 2))
+
+        self.chapter_warning_label = ttk.Label(info_frame, text="", style="Card.TLabel", font=("Segoe UI", 9, "bold"), foreground="#fab387", wraplength=720)
+        # Note: chapter_warning_label is packed dynamically when >88 min tracks are detected
 
         list_subframe = ttk.Frame(info_frame, style="Card.TFrame")
         list_subframe.pack(fill="x", expand=True)
@@ -929,6 +982,32 @@ revisions require battery power to boot.
         self.update_bitrate_label()
         self.update_estimates()
 
+    def on_split_mins_changed(self, *args):
+        """Handle focus out / edits to the fixed chapter split minutes spinbox and refresh the chapter table."""
+        if not self.audio_info:
+            return
+        try:
+            raw = self.sp_mins.get().strip() if hasattr(self, "sp_mins") else str(self.split_mins.get())
+            if not raw:
+                return
+            val = int(raw)
+            if val <= 0:
+                val = 15
+            val = max(1, min(360, val))
+            self.split_mins.set(val)
+        except Exception:
+            try:
+                val = max(1, min(360, int(self.split_mins.get())))
+                self.split_mins.set(val)
+            except Exception:
+                return
+
+        # Ensure duration splitting mode is active
+        if self.split_mode.get() != "duration":
+            self.split_mode.set("duration")
+
+        self.update_estimates(replan=True)
+
     def on_drive_selected(self, event=None):
         self.update_estimates()
 
@@ -944,9 +1023,15 @@ revisions require battery power to boot.
                     key = (s.get("file"), s.get("start"), s.get("end"))
                     excluded_map[key] = s.get("excluded", False)
 
+            mode = self.split_mode.get()
+            has_chapters = bool(self.audio_info and self.audio_info.get("files") and self.audio_info["files"][0].get("chapters"))
+            if mode == "chapters" and not has_chapters:
+                self.split_mode.set("duration")
+                mode = "duration"
+
             self.planned_segments = plan_chapters(
                 input_path=self.input_path.get(),
-                split_mode=self.split_mode.get(),
+                split_mode=mode,
                 split_mins=self.split_mins.get(),
                 title=self.book_title.get(),
                 subchapter_mode=self.subchapter_mode.get(),
@@ -1085,6 +1170,23 @@ revisions require battery power to boot.
         stats_str = f"Active Tracks: {num_tracks}{ex_str} | Original: {orig_dur_str} | Actual: {eff_dur_str} @ {spd}x"
         self.stats_label.config(text=stats_str)
 
+        # Check for tracks exceeding 88 minutes (Firmware 01:03 freeze limit)
+        long_warnings = check_track_duration_warnings(self.planned_segments, speed=spd)
+        if long_warnings:
+            warn_count = len(long_warnings)
+            if warn_count == 1:
+                first_w = long_warnings[0]
+                warn_msg = f"⚠️ WARNING: Track #{first_w['index']} is {first_w['effective_mins']}m (>88m)! Firmware 01:03 devices will freeze. Use '✂️ Split Chapter' or switch Split Mode."
+            else:
+                warn_msg = f"⚠️ WARNING: {warn_count} tracks exceed 88 mins (Firmware 01:03 freeze limit)! Use '✂️ Split Chapter' or switch Split Mode to fixed 15-60m."
+            self.chapter_warning_label.config(text=warn_msg)
+            if not self.chapter_warning_label.winfo_ismapped():
+                self.chapter_warning_label.pack(anchor="w", pady=(0, 4))
+        else:
+            self.chapter_warning_label.config(text="")
+            if self.chapter_warning_label.winfo_ismapped():
+                self.chapter_warning_label.pack_forget()
+
         # Measure column character lengths for auto-sizing
         col_max_chars = {
             "index": len("#"),
@@ -1102,11 +1204,13 @@ revisions require battery power to boot.
                 t_title = raw_title
 
             is_silence = seg.get("is_silence", False) or seg.get("file") == "__SILENCE__"
+            is_excluded = seg.get("excluded", False)
 
             if is_silence:
                 eff_dur_sec = 5.0
                 timeframe_str = "0m 00s -> 0m 05s"
                 length_str = "5s"
+                row_tag = "active"
             else:
                 # Calculate speed-adjusted effective durations and timestamps
                 eff_dur_sec = seg.get("duration", 0.0) / max(0.25, spd)
@@ -1117,12 +1221,17 @@ revisions require battery power to boot.
                 t_start = format_duration(eff_start_sec)
                 t_end = format_duration(eff_end_sec)
                 timeframe_str = f"{t_start} -> {t_end}"
-                length_str = f"{dur_m}m"
+
+                if dur_m > MAX_SAFE_TRACK_MINS and not is_excluded:
+                    length_str = f"⚠️ {dur_m}m"
+                    row_tag = "warning"
+                else:
+                    length_str = f"{dur_m}m"
+                    row_tag = "excluded" if is_excluded else "active"
 
             sub_tag = "[AF*] " if self.subchapter_mode.get() else ""
             full_title = f"{sub_tag}{t_title}"
             
-            is_excluded = seg.get("excluded", False)
             status_str = "❌ Excluded" if is_excluded else "✓ Active"
 
             # Track character counts for auto-fit column width calculation
@@ -1138,14 +1247,15 @@ revisions require battery power to boot.
                 "end",
                 iid=str(idx - 1),
                 values=(idx_str, full_title, timeframe_str, length_str, status_str),
-                tags=("excluded",) if is_excluded else ("active",)
+                tags=(row_tag,)
             )
 
         self.chapter_tree.tag_configure("excluded", foreground="#f38ba8")
         self.chapter_tree.tag_configure("active", foreground="#cdd6f4")
+        self.chapter_tree.tag_configure("warning", foreground="#fab387")
 
         # Auto-size Treeview Columns dynamically based on content lengths
-        min_col_widths = {"index": 45, "title": 160, "timeframe": 220, "length": 75, "status": 80}
+        min_col_widths = {"index": 45, "title": 160, "timeframe": 220, "length": 85, "status": 80}
         char_multipliers = {"index": 8, "title": 8, "timeframe": 8, "length": 9, "status": 9}
         padding_map = {"index": 20, "title": 30, "timeframe": 30, "length": 25, "status": 25}
 
@@ -1405,9 +1515,11 @@ revisions require battery power to boot.
                     "-autoexit",
                     "-ss", str(sample_start),
                     "-t", str(ff_play_dur),
-                    "-af", filter_str,
-                    "-i", str(file_path)
                 ]
+                if filter_str:
+                    cmd.extend(["-af", filter_str])
+                cmd.extend(["-i", str(file_path)])
+
                 creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
                 self.preview_process = subprocess.Popen(cmd, creationflags=creationflags, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 self.preview_process.wait()
@@ -1738,6 +1850,25 @@ revisions require battery power to boot.
             messagebox.showerror("Error", "Please select a valid audiobook input file or folder first!")
             return
 
+        # SAFETY CHECK: Track Duration Warning (> 88 mins)
+        active_segments = [s for s in self.planned_segments if not s.get("excluded", False)]
+        long_tracks = check_track_duration_warnings(active_segments, speed=self.playback_speed.get())
+        if long_tracks:
+            lines = [f"• Track #{t['index']}: {t['title']} ({t['effective_mins']} mins)" for t in long_tracks[:5]]
+            if len(long_tracks) > 5:
+                lines.append(f"• ... and {len(long_tracks) - 5} more tracks")
+            track_list_str = "\n".join(lines)
+            confirm_long = messagebox.askyesno(
+                "⚠️ Long Chapter Warning (>88 mins)",
+                f"WARNING: {len(long_tracks)} track(s) exceed 88 minutes:\n\n{track_list_str}\n\n"
+                f"On Playaway hardware running Firmware 01:03, tracks longer than 88 minutes cause the decoder to freeze playback and fail to auto power off.\n\n"
+                f"Recommendation: Set 'Chapter Splitting Mode' to 'Split into fixed duration (15–60 mins)' or split long tracks using '✂️ Split Chapter at Scrubber'.\n\n"
+                f"Do you want to proceed with export anyway?",
+                icon="warning"
+            )
+            if not confirm_long:
+                return
+
         parent_dir = filedialog.askdirectory(title="Select Local Folder to Save Generated Playaway Files")
         if not parent_dir:
             return
@@ -1854,6 +1985,25 @@ revisions require battery power to boot.
                 "Real Playaway hardware flash chips are 1GB or smaller. Large hard drives and SSDs are blocked to prevent accidental wiping."
             )
             return
+
+        # SAFETY CHECK 3: Track Duration Warning (> 88 mins)
+        active_segments = [s for s in self.planned_segments if not s.get("excluded", False)]
+        long_tracks = check_track_duration_warnings(active_segments, speed=self.playback_speed.get())
+        if long_tracks:
+            lines = [f"• Track #{t['index']}: {t['title']} ({t['effective_mins']} mins)" for t in long_tracks[:5]]
+            if len(long_tracks) > 5:
+                lines.append(f"• ... and {len(long_tracks) - 5} more tracks")
+            track_list_str = "\n".join(lines)
+            confirm_long = messagebox.askyesno(
+                "⚠️ Long Chapter Warning (>88 mins)",
+                f"WARNING: {len(long_tracks)} track(s) exceed 88 minutes:\n\n{track_list_str}\n\n"
+                f"On Playaway hardware running Firmware 01:03, tracks longer than 88 minutes cause the decoder to freeze playback and fail to auto power off.\n\n"
+                f"Recommendation: Set 'Chapter Splitting Mode' to 'Split into fixed duration (15–60 mins)' or split long tracks using '✂️ Split Chapter at Scrubber'.\n\n"
+                f"Do you want to proceed with flashing anyway?",
+                icon="warning"
+            )
+            if not confirm_long:
+                return
 
         # Confirm wipe
         confirm = messagebox.askyesno(

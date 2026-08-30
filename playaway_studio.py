@@ -5,7 +5,6 @@ Supports both CLI subcommands (for Linux/terminal users) and GUI window mode (fo
 """
 
 import sys
-import os
 import argparse
 import tempfile
 from pathlib import Path
@@ -14,7 +13,7 @@ from playaway_core import (
     detect_playaway_drives,
     inspect_audio_source,
     plan_chapters,
-    convert_segment_to_awb,
+    check_track_duration_warnings,
     convert_all_segments_parallel,
     generate_patweaks_content,
     flash_playaway,
@@ -22,7 +21,7 @@ from playaway_core import (
     estimate_bitrate_size,
     load_config
 )
-from fetch_encoder import setup_encoder, find_encoder
+from fetch_encoder import setup_encoder
 
 
 def log_cli(msg):
@@ -92,6 +91,14 @@ def cmd_convert(args):
         subchapter_mode=subchapters
     )
 
+    # Check for tracks exceeding 88 minutes (Firmware 01:03 freeze limit)
+    long_warnings = check_track_duration_warnings(segments, speed=speed)
+    if long_warnings:
+        print(f"\n[⚠️  WARNING] {len(long_warnings)} track(s) exceed 88 minutes (Firmware 01:03 freeze limit):")
+        for w in long_warnings:
+            print(f"  • Track #{w['index']}: {w['title']} ({w['effective_mins']} mins @ {speed}x)")
+        print("  Recommendation: Use '--split-mins 15' or '--split-mins 60' to prevent player freezes.\n")
+
     print(f"\nPlanned Tracks ({len(segments)}):")
     for s in segments[:5]:
         print(f"  - {s['out_name']} ({round(s['duration']/60, 1)} mins)")
@@ -134,6 +141,28 @@ def cmd_flash(args):
     subchapters = args.subchapters or cfg.get("subchapter_mode", False)
     preserve_pitch = cfg.get("preserve_pitch", True)
 
+    info = inspect_audio_source(input_path)
+    segments = plan_chapters(
+        input_path=input_path,
+        split_mode=split_mode,
+        split_mins=split_mins,
+        title=args.title or info["title"],
+        subchapter_mode=subchapters
+    )
+
+    # Check for tracks exceeding 88 minutes (Firmware 01:03 freeze limit)
+    long_warnings = check_track_duration_warnings(segments, speed=speed)
+    if long_warnings:
+        print(f"\n[⚠️  WARNING] {len(long_warnings)} track(s) exceed 88 minutes (Firmware 01:03 freeze limit):")
+        for w in long_warnings:
+            print(f"  • Track #{w['index']}: {w['title']} ({w['effective_mins']} mins @ {speed}x)")
+        print("  Recommendation: Use '--split-mins 15' or '--split-mins 60' to prevent player freezes.\n")
+        if not args.yes:
+            cont = input("Continue flashing anyway? [y/N]: ")
+            if cont.lower() not in ("y", "yes"):
+                print("Flash aborted.")
+                return
+
     if not args.yes:
         confirm = input(f"WARNING: All existing files on drive {drive_path} will be ERASED. Continue? [y/N]: ")
         if confirm.lower() not in ("y", "yes"):
@@ -144,15 +173,6 @@ def cmd_flash(args):
     if not enc_exe:
         print("[!] Error: 3GPP encoder missing. Cannot convert.")
         sys.exit(1)
-
-    info = inspect_audio_source(input_path)
-    segments = plan_chapters(
-        input_path=input_path,
-        split_mode=split_mode,
-        split_mins=split_mins,
-        title=args.title or info["title"],
-        subchapter_mode=subchapters
-    )
 
     with tempfile.TemporaryDirectory(prefix="playaway_cli_staging_") as temp_dir:
         print(f"\nConverting {len(segments)} tracks to temporary staging in parallel (Speed: {speed}x)...")
