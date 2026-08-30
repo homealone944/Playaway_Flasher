@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Audio / Staging / Backups
+staging/
+backups/
+temp/
+*.awb
+*.wav
+*.mp3
+*.m4b
+*.aac
+*.flac
+*.DAT
+*.SAV
+
+# OS / Editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
