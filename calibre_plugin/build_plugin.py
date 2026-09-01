@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 build_plugin.py - Calibre Plugin Bundler & Installer
-Packages all plugin scripts and shared core files into a ready-to-install 'Playaway_Flasher.zip'.
+Packages all plugin scripts and shared core files into a ready-to-install 'Calibre_Playaway_Flasher.zip'.
 """
 
 import os
@@ -82,12 +82,12 @@ def create_default_icon(icon_path):
 
 
 def build_plugin_zip():
-    """Package Calibre plugin files into Playaway_Flasher.zip."""
+    """Package Calibre plugin files into Calibre_Playaway_Flasher.zip."""
     DIST_DIR.mkdir(parents=True, exist_ok=True)
     icon_path = PLUGIN_DIR / "images" / "icon.png"
     create_default_icon(icon_path)
 
-    print("Building Calibre Plugin: Playaway_Flasher.zip...")
+    print("Building Calibre Plugin: Calibre_Playaway_Flasher.zip...")
     
     files_to_pack = [
         (PLUGIN_DIR / "__init__.py", "__init__.py"),

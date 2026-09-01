@@ -118,13 +118,13 @@ Flash audiobooks directly from your **Calibre** library with one click!
 
 #### 📦 Download & Installation:
 1. **Download the Plugin**:
-   - Download the latest **[`Playaway_Flasher.zip`](https://github.com/homealone944/Playaway_Flasher/releases)** from the [GitHub Releases](https://github.com/homealone944/Playaway_Flasher/releases) page.
-   - *Or build from source*: Run `python calibre_plugin/build_plugin.py` to generate `dist/Playaway_Flasher.zip`.
+   - Download the latest **[`Calibre_Playaway_Flasher.zip`](https://github.com/homealone944/Playaway_Flasher/releases)** from the [GitHub Releases](https://github.com/homealone944/Playaway_Flasher/releases) page.
+   - *Or build from source*: Run `python calibre_plugin/build_plugin.py` to generate `dist/Calibre_Playaway_Flasher.zip`.
 
 2. **Install into Calibre**:
    - Open **Calibre** $\rightarrow$ Click **Preferences** (<kbd>Ctrl</kbd>+<kbd>P</kbd>) $\rightarrow$ **Plugins** (under *Advanced*).
    - Click the **"Load plugin from file"** button in the bottom right.
-   - Select `Playaway_Flasher.zip`.
+   - Select `Calibre_Playaway_Flasher.zip`.
    - Click **Yes** on the security warning and **restart Calibre**.
 
 3. **Usage in Calibre**:
@@ -159,7 +159,7 @@ Flash audiobooks directly from your **Calibre** library with one click!
 - `calibre_plugin/`: Native Calibre plugin integration (UI actions, Qt dialogs, packaging builder).
 - `fetch_encoder.py`: Automated setup helper for official 3GPP AMR-WB+ encoder binaries.
 - `tools/`: Directory holding `encoder.exe` and `er-libisomedia.dll`.
-- `dist/`: Directory containing built `Playaway_Flasher.zip` Calibre plugin package.
+- `dist/`: Directory containing built `Calibre_Playaway_Flasher.zip` Calibre plugin package.
 
 ---
 
