@@ -56,7 +56,7 @@ Playaway players have internal PCB test pads intended for factory programming. Y
    - **D+ (Data Plus)** -> `D+` pad
    - **GND (Ground)** -> `GND` / `-` pad
 4. (Optional) Mount a USB-C female port into the plastic casing.
-5. Keep a fresh **AAA battery** inside the unit while flashing/using, as some SoC chip revisions require battery power to boot.
+5. **Battery Notice**: Flashing was tested and verified **without the AAA battery inserted** (the player is powered directly from USB 5V VBUS). Flashing with the battery installed is currently untested.
 
 ---
 

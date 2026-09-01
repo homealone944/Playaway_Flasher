@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).parent.parent.resolve()
 PLUGIN_DIR = ROOT_DIR / "calibre_plugin"
 DIST_DIR = ROOT_DIR / "dist"
-OUTPUT_ZIP = DIST_DIR / "Playaway_Flasher.zip"
+OUTPUT_ZIP = DIST_DIR / "Calibre_Playaway_Flasher.zip"
 
 
 def create_default_icon(icon_path):

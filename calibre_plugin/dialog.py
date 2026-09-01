@@ -464,7 +464,7 @@ class PlayawayDialog(QDialog):
 
         for d in self.drives:
             tag = " [Playaway ✓]" if d["is_playaway"] else ""
-            label = f"{d['path']} ({d['label']}) — {d['free_mb']} MB free{tag}"
+            label = f"{d['path']} ({d['label']}) — {d['free_mb']} MB free / {d['total_mb']} MB total{tag}"
             self.combo_drives.addItem(label, d)
 
         self.btn_flash.setEnabled(True)
@@ -513,17 +513,17 @@ class PlayawayDialog(QDialog):
         if not self.audio_info:
             return
         
-        free_mb = 105.0
+        capacity_mb = 105.0
         d_data = self.combo_drives.currentData()
         if d_data and isinstance(d_data, dict):
-            free_mb = d_data.get("free_mb", 105.0)
+            capacity_mb = d_data.get("total_mb", d_data.get("free_mb", 105.0))
 
         dur_sec = self.audio_info["total_duration_sec"]
         spd = self.get_selected_speed()
-        fit_kbps = calculate_autofit_bitrate(dur_sec, target_free_mb=free_mb, speed=spd)
+        fit_kbps = calculate_autofit_bitrate(dur_sec, target_capacity_mb=capacity_mb, speed=spd)
         self.spin_bitrate.setValue(fit_kbps)
         self.update_estimates(replan=False)
-        QMessageBox.information(self, "Auto-Fit Bitrate", f"Optimal Bitrate calculated: {fit_kbps} kbps based on {free_mb} MB available storage.")
+        QMessageBox.information(self, "Auto-Fit Bitrate", f"Optimal Bitrate calculated: {fit_kbps} kbps based on {capacity_mb} MB total storage capacity.")
 
     def update_estimates(self, replan=True):
         if not self.audio_info:
@@ -761,7 +761,7 @@ class QuickFlashDialog(QDialog):
             target_d = self.drives[0]
             self.drive_path = target_d["path"]
             tag = " [Playaway ✓]" if target_d["is_playaway"] else ""
-            h_layout.addWidget(QLabel(f"<b>{target_d['path']}</b> ({target_d['label']}) — {target_d['free_mb']} MB free{tag}"), 2, 1)
+            h_layout.addWidget(QLabel(f"<b>{target_d['path']}</b> ({target_d['label']}) — {target_d['free_mb']} MB free / {target_d['total_mb']} MB total{tag}"), 2, 1)
         else:
             self.drive_path = None
             lbl_no = QLabel("<font color='#e74c3c'><b>No Playaway USB drive detected!</b></font>")
@@ -775,9 +775,9 @@ class QuickFlashDialog(QDialog):
         pitch = bool(self.cfg.get("preserve_pitch", True))
         subchap = bool(self.cfg.get("subchapter_mode", False))
 
-        free_mb = self.drives[0]["free_mb"] if self.drives else 105.0
+        capacity_mb = (self.drives[0].get("total_mb", self.drives[0].get("free_mb", 105.0))) if self.drives else 105.0
         dur_sec = self.audio_info["total_duration_sec"]
-        bitrate = calculate_autofit_bitrate(dur_sec, target_free_mb=free_mb, speed=spd)
+        bitrate = calculate_autofit_bitrate(dur_sec, target_capacity_mb=capacity_mb, speed=spd)
 
         # Check if the audio file actually contains embedded chapter markers
         has_chapters = bool(self.audio_info.get("files") and self.audio_info["files"][0].get("chapters"))
@@ -807,13 +807,15 @@ class QuickFlashDialog(QDialog):
 
         active_dur = sum(s.get("duration", 0) for s in self.planned_segments)
         est_mb = estimate_bitrate_size(active_dur, bitrate, speed=spd)
+        fill_pct = int(round((est_mb / max(1.0, capacity_mb)) * 100))
 
         cfg_box = QGroupBox("⚙️ Applied Saved Default Settings")
         c_layout = QGridLayout(cfg_box)
         c_layout.addWidget(QLabel(f"• <b>Splitting:</b> {split_desc}"), 0, 0)
         c_layout.addWidget(QLabel(f"• <b>Planned Tracks:</b> {len(self.planned_segments)} tracks"), 0, 1)
         c_layout.addWidget(QLabel(f"• <b>Speed:</b> {spd}x (Pitch: {'Preserved' if pitch else 'Off'})"), 1, 0)
-        c_layout.addWidget(QLabel(f"• <b>Bitrate:</b> {bitrate} kbps (Est. Size: ~{est_mb} MB)"), 1, 1)
+        c_layout.addWidget(QLabel(f"• <b>Bitrate:</b> {bitrate} kbps (Auto-Fit)"), 1, 1)
+        c_layout.addWidget(QLabel(f"• <b>Estimated Size:</b> <b>~{est_mb} MB</b> / {int(capacity_mb)} MB capacity ({fill_pct}% full)"), 2, 0, 1, 2)
         layout.addWidget(cfg_box)
 
         # Progress bar & Status
@@ -822,7 +824,7 @@ class QuickFlashDialog(QDialog):
         self.progress_bar.setValue(0)
         layout.addWidget(self.progress_bar)
 
-        self.lbl_status = QLabel("Ready for 1-Click Quick Flash.")
+        self.lbl_status = QLabel(f"Ready for 1-Click Quick Flash (~{est_mb} MB output).")
         layout.addWidget(self.lbl_status)
 
         # Buttons
@@ -830,7 +832,7 @@ class QuickFlashDialog(QDialog):
         self.btn_quick = QPushButton("⚡ Start Quick Flash")
         self.btn_quick.setStyleSheet("font-weight: bold; font-size: 11pt; padding: 6px;")
         self.btn_quick.setEnabled(bool(self.drive_path))
-        self.btn_quick.clicked.connect(lambda: self.start_quick_flash(spd, bitrate, pitch, subchap))
+        self.btn_quick.clicked.connect(lambda: self.start_quick_flash(spd, bitrate, pitch, subchap, est_mb, capacity_mb))
         btn_box.addWidget(self.btn_quick)
 
         btn_custom = QPushButton("🎛️ Custom Flash...", self)
@@ -856,7 +858,7 @@ class QuickFlashDialog(QDialog):
         dlg = PlayawayDialog(self.gui, self.book_id, self.book_title, self.audio_path, self.available_formats)
         dlg.exec_()
 
-    def start_quick_flash(self, speed, bitrate, pitch, subchap):
+    def start_quick_flash(self, speed, bitrate, pitch, subchap, est_mb=None, capacity_mb=None):
         if not self.drive_path:
             QMessageBox.warning(self, "No Drive", "No Playaway USB drive detected.")
             return
@@ -875,9 +877,14 @@ class QuickFlashDialog(QDialog):
             if res != QMessageBox.Yes:
                 return
 
+        size_info = f"\n• Estimated Size: ~{est_mb} MB / {int(capacity_mb)} MB total capacity" if est_mb and capacity_mb else ""
         res = QMessageBox.warning(
             self, "Confirm Quick Flash",
-            f"Wipe and flash '{self.book_title}' onto drive {self.drive_path}?\n\nAll existing files on {self.drive_path} will be erased.",
+            f"Wipe and flash '{self.book_title}' onto drive {self.drive_path}?\n"
+            f"{size_info}\n"
+            f"• Planned Tracks: {len(self.planned_segments)}\n"
+            f"• Bitrate: {bitrate} kbps @ {speed}x speed\n\n"
+            f"WARNING: All existing files on {self.drive_path} will be erased.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if res != QMessageBox.Yes:
@@ -1085,6 +1092,7 @@ class PlayawayHelpDialog(QDialog):
             <tr><td><b>D+ / DP</b></td><td>USB Data Plus</td><td>Pin 3 (Green)</td></tr>
             <tr><td><b>GND</b></td><td>Ground</td><td>Pin 4 (Black)</td></tr>
         </table>
+        <p><b>⚠️ Battery Notice:</b> Flashing was tested and verified <b>without the AAA battery inserted</b> (the player is powered directly over USB 5V VBUS). Flashing with the battery installed is currently untested.</p>
 
         <hr/>
         <h3>⚠️ Critical Firmware Bugs & Gotchas</h3>

@@ -292,7 +292,7 @@ def estimate_bitrate_size(duration_sec, bitrate_kbps=10, speed=1.0):
     return round(mb * 1.05, 2)
 
 
-def calculate_autofit_bitrate(duration_sec, target_free_mb=105.0, speed=1.0):
+def calculate_autofit_bitrate(duration_sec, target_capacity_mb=105.0, speed=1.0, target_free_mb=None):
     """
     Calculate maximum safe bitrate (between 10 and 36 kbps) to fill target Playaway storage.
     """
@@ -300,8 +300,10 @@ def calculate_autofit_bitrate(duration_sec, target_free_mb=105.0, speed=1.0):
     if effective_dur <= 0:
         return 10
     
+    capacity = target_free_mb if target_free_mb is not None else target_capacity_mb
+    
     # Reserve 5% safety margin for FAT table overhead & PATWEAKS.DAT
-    usable_bytes = (target_free_mb * 1024 * 1024) * 0.95
+    usable_bytes = (capacity * 1024 * 1024) * 0.95
     usable_bits = usable_bytes * 8
     
     calc_bitrate_bps = usable_bits / effective_dur

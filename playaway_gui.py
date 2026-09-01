@@ -11,6 +11,7 @@ import threading
 import subprocess
 import re
 import ctypes
+import tempfile
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 from pathlib import Path
@@ -845,8 +846,8 @@ Solder 4 connections from a USB cable or USB-C breakout board to the PCB test pa
   3. D+ (Data Plus) -> D+ test pad
   4. GND (Ground) -> GND / - test pad
 
-Note: Keep a fresh AAA battery inside the unit while flashing/using, as some SoC chip
-revisions require battery power to boot.
+Note on Battery: Flashing was tested and verified WITHOUT the AAA battery inserted
+(powered directly via USB 5V VBUS). Flashing with the battery installed is currently untested.
 
 --------------------------------------------------------------------------------
 8. 🔢 TRACK LIMITS & PERFORMANCE
@@ -962,18 +963,18 @@ revisions require battery power to boot.
 
     def update_bitrate_label(self):
         kbps = self.bitrate_kbps.get()
-        free_mb = 105.0
+        capacity_mb = 105.0
         sel_drive_str = self.selected_drive.get()
         if sel_drive_str and not sel_drive_str.startswith("--"):
             drive_path = sel_drive_str.split()[0]
             matching_d = next((d for d in self.drives if d['path'] == drive_path), None)
             if matching_d:
-                free_mb = matching_d['free_mb']
+                capacity_mb = matching_d.get('total_mb') or matching_d.get('free_mb', 105.0)
 
-        total_bits = free_mb * 1024 * 1024 * 8
+        total_bits = capacity_mb * 1024 * 1024 * 8
         hrs = round(total_bits / (kbps * 1000 * 3600), 1)
         mode_tag = " (Auto-Fit)" if getattr(self, "bitrate_is_auto", tk.BooleanVar(value=True)).get() else " (Manual)"
-        self.bitrate_label.config(text=f"Bitrate: {kbps} kbps{mode_tag} (Max ~{hrs} hrs on {int(free_mb)}MB capacity)")
+        self.bitrate_label.config(text=f"Bitrate: {kbps} kbps{mode_tag} (Max ~{hrs} hrs on {int(capacity_mb)}MB capacity)")
 
     def on_bitrate_slide(self, val):
         self.bitrate_is_auto.set(False)  # User manually adjusted slider!
@@ -1050,15 +1051,15 @@ revisions require battery power to boot.
 
         # Auto-calculate bitrate if Auto-Fit mode is enabled
         if getattr(self, "bitrate_is_auto", tk.BooleanVar(value=True)).get() and active_dur_sec > 0:
-            free_mb = 105.0
+            capacity_mb = 105.0
             sel_drive_str = self.selected_drive.get()
             if sel_drive_str and not sel_drive_str.startswith("--"):
                 drive_path = sel_drive_str.split()[0]
                 matching_d = next((d for d in self.drives if d['path'] == drive_path), None)
                 if matching_d:
-                    free_mb = matching_d['free_mb']
+                    capacity_mb = matching_d.get('total_mb') or matching_d.get('free_mb', 105.0)
             spd = self.playback_speed.get()
-            auto_kbps = calculate_autofit_bitrate(active_dur_sec, target_free_mb=free_mb, speed=spd)
+            auto_kbps = calculate_autofit_bitrate(active_dur_sec, target_capacity_mb=capacity_mb, speed=spd)
             self.bitrate_kbps.set(auto_kbps)
 
         self.update_bitrate_label()
@@ -1071,8 +1072,8 @@ revisions require battery power to boot.
         ex_count = len(self.planned_segments) - num_tracks
         ex_suffix = f" ({ex_count} cut)" if ex_count > 0 else ""
 
-        # Capacity check threshold
-        free_mb = 105.0
+        # Capacity check threshold (based on total disk capacity since flashing wipes the drive)
+        capacity_mb = 105.0
         sel_drive_str = self.selected_drive.get()
         has_drive_selected = False
         if sel_drive_str and not sel_drive_str.startswith("--"):
@@ -1080,7 +1081,7 @@ revisions require battery power to boot.
             drive_path = sel_drive_str.split()[0]
             matching_d = next((d for d in self.drives if d['path'] == drive_path), None)
             if matching_d:
-                free_mb = matching_d['free_mb']
+                capacity_mb = matching_d.get('total_mb') or matching_d.get('free_mb', 105.0)
 
         if num_tracks > 999:
             self.estimate_label.config(
@@ -1091,11 +1092,11 @@ revisions require battery power to boot.
             self.btn_flash.config(state="disabled")
             if has_drive_selected:
                 self.progress_status_label.config(text="⚠️ Flash Disabled: Playaway hardware supports a maximum of 999 tracks.")
-        elif est_mb > free_mb:
+        elif est_mb > capacity_mb:
             # EXCEEDS CAPACITY WARNING: Change text to RED & disable Wipe & Flash
             suggestions = (
                 f"Active Tracks: {num_tracks}{ex_suffix} | Estimated Size: ~{est_mb} MB\n"
-                f"⚠️ EXCEEDS CAPACITY! (Max: {int(free_mb)} MB)\n"
+                f"⚠️ EXCEEDS CAPACITY! (Max: {int(capacity_mb)} MB)\n"
                 f"💡 Options to reduce size:\n"
                 f"  • Click ⚡ Auto-Fit Bitrate to lower encoding bitrate\n"
                 f"  • Increase Playback Speed (e.g. 1.25x or 1.5x)\n"
@@ -1806,7 +1807,7 @@ revisions require battery power to boot.
             return
 
         self.bitrate_is_auto.set(True)  # User clicked Auto-Fit button!
-        free_mb = 105.0  # Default ~105MB usable space on standard Playaway 128MB flash
+        capacity_mb = 105.0  # Default ~105MB usable space on standard Playaway 128MB flash
         storage_source_desc = "Default Playaway Capacity (~105 MB Usable Flash)"
         
         sel_drive_str = self.selected_drive.get()
@@ -1814,8 +1815,8 @@ revisions require battery power to boot.
             drive_path = sel_drive_str.split()[0]
             matching_d = next((d for d in self.drives if d['path'] == drive_path), None)
             if matching_d:
-                free_mb = matching_d['free_mb']
-                storage_source_desc = f"Connected USB Drive {drive_path} ({free_mb} MB Free)"
+                capacity_mb = matching_d.get('total_mb') or matching_d.get('free_mb', 105.0)
+                storage_source_desc = f"Connected USB Drive {drive_path} ({capacity_mb} MB Total Capacity)"
 
         # Calculate duration of active (non-excluded) segments only
         if self.planned_segments:
@@ -1825,7 +1826,7 @@ revisions require battery power to boot.
             dur_sec = self.audio_info["total_duration_sec"]
 
         spd = self.playback_speed.get()
-        fit_kbps = calculate_autofit_bitrate(dur_sec, target_free_mb=free_mb, speed=spd)
+        fit_kbps = calculate_autofit_bitrate(dur_sec, target_capacity_mb=capacity_mb, speed=spd)
 
         self.bitrate_kbps.set(fit_kbps)
         self.update_bitrate_label()
@@ -1836,7 +1837,7 @@ revisions require battery power to boot.
             "Auto-Fit Bitrate Calculated",
             f"Optimal Bitrate: {fit_kbps} kbps\n\n"
             f"Storage Capacity Source:\n• {storage_source_desc}\n\n"
-            f"This automatically selects the highest possible audio quality that will fit your audiobook into {free_mb} MB of target storage!"
+            f"This automatically selects the highest possible audio quality that will fit your audiobook into {capacity_mb} MB of target storage!"
         )
 
     def stop_operation(self):

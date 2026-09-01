@@ -112,7 +112,7 @@ class PlayawayAction(InterfaceAction):
         lines = []
         for d in drives:
             tag = " [Playaway Verified ✓]" if d["is_playaway"] else ""
-            lines.append(f"• <b>{d['path']}</b> ({d['label']}) — {d['free_mb']} MB free{tag}")
+            lines.append(f"• <b>{d['path']}</b> ({d['label']}) — {d['free_mb']} MB free / {d['total_mb']} MB total{tag}")
 
         QMessageBox.information(
             self.gui,

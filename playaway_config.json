@@ -1,8 +1,9 @@
 {
-    "split_mode": "duration",
+    "split_mode": "chapters",
     "split_mins": 25,
     "subchapter_mode": true,
     "playback_speed": 1.0,
     "preserve_pitch": true,
-    "bitrate_kbps": "auto"
+    "bitrate_kbps": "auto",
+    "final_chapter_silence": true
 }
