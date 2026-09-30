@@ -16,14 +16,14 @@ try:
         QLabel, QComboBox, QPushButton, QProgressBar, QMessageBox, QSpinBox,
         QRadioButton, QCheckBox, QTreeWidget, QTreeWidgetItem, QThread,
         pyqtSignal, QIcon, QFont, Qt, QFileDialog, QTextEdit, QHeaderView,
-        QButtonGroup, QColor
+        QButtonGroup, QColor, QAbstractItemView, QInputDialog
     )
 except ImportError:
     from PyQt5.QtWidgets import (
         QDialog, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
         QLabel, QComboBox, QPushButton, QProgressBar, QMessageBox, QSpinBox,
         QRadioButton, QCheckBox, QTreeWidget, QTreeWidgetItem,
-        QFileDialog, QTextEdit, QHeaderView, QButtonGroup
+        QFileDialog, QTextEdit, QHeaderView, QButtonGroup, QAbstractItemView, QInputDialog
     )
     from PyQt5.QtCore import QThread, pyqtSignal, Qt
     from PyQt5.QtGui import QIcon, QFont, QColor
@@ -33,6 +33,7 @@ try:
         detect_playaway_drives,
         inspect_audio_source,
         plan_chapters,
+        merge_segments,
         check_track_duration_warnings,
         MAX_SAFE_TRACK_MINS,
         convert_all_segments_parallel,
@@ -56,6 +57,7 @@ except (ImportError, ValueError):
             detect_playaway_drives,
             inspect_audio_source,
             plan_chapters,
+            merge_segments,
             check_track_duration_warnings,
             MAX_SAFE_TRACK_MINS,
             convert_all_segments_parallel,
@@ -78,6 +80,7 @@ except (ImportError, ValueError):
             detect_playaway_drives,
             inspect_audio_source,
             plan_chapters,
+            merge_segments,
             check_track_duration_warnings,
             MAX_SAFE_TRACK_MINS,
             convert_all_segments_parallel,
@@ -150,14 +153,32 @@ class WorkerThread(QThread):
                     cancel_event=self.cancel_event
                 )
 
+                cfg = load_config()
+                pat_opts = {
+                    "subchapter_mode": subchapters,
+                    "version": cfg.get("patweaks_version", "082002"),
+                    "volume": cfg.get("patweaks_volume", 90),
+                    "speed": cfg.get("patweaks_speed", 80),
+                    "powerup_profile": cfg.get("patweaks_powerup", 3),
+                    "backlight_sec": cfg.get("patweaks_backlight", 0),
+                    "custom_override": cfg.get("patweaks_custom", None)
+                }
+
                 # Write PATWEAKS.DAT
-                pat_content = generate_patweaks_content(len(segments), subchapters)
+                pat_content = generate_patweaks_content(len(segments), **pat_opts)
                 with open(export_dir / "PATWEAKS.DAT", "wb") as f:
                     f.write(pat_content.encode("ascii"))
 
-                # Write README instructions
+                # Write README instructions & COPYRIGHT.TXT
+                author_val = self.params.get("author", "")
+                cprt_val = self.params.get("copyright_info", "")
+                readme_text = generate_copy_instructions(clean_title, len(segments), author=author_val, copyright_info=cprt_val)
                 with open(export_dir / "README_HOW_TO_COPY.txt", "w", encoding="utf-8") as f:
-                    f.write(generate_copy_instructions(clean_title, len(segments)))
+                    f.write(readme_text)
+
+                if author_val or cprt_val:
+                    with open(export_dir / "COPYRIGHT.TXT", "w", encoding="utf-8") as f:
+                        f.write(generate_copyright_file_content(clean_title, author=author_val, copyright_info=cprt_val, track_count=len(segments)))
 
                 self.progress.emit(100, 100, "Export Completed ✓")
                 self.completed.emit(f"Audiobook exported successfully to:\n{export_dir}")
@@ -190,13 +211,28 @@ class WorkerThread(QThread):
                     def on_flash_prog(cur, tot, desc):
                         self.progress.emit(cur, tot, f"💾 {desc}")
 
+                    cfg = load_config()
+                    pat_opts = {
+                        "subchapter_mode": subchapters,
+                        "version": cfg.get("patweaks_version", "082002"),
+                        "volume": cfg.get("patweaks_volume", 90),
+                        "speed": cfg.get("patweaks_speed", 80),
+                        "powerup_profile": cfg.get("patweaks_powerup", 3),
+                        "backlight_sec": cfg.get("patweaks_backlight", 20),
+                        "custom_override": cfg.get("patweaks_custom", None)
+                    }
+
                     flash_playaway(
                         drive_path=drive_path,
                         awb_dir=temp_dir,
                         track_count=len(segments),
                         subchapter_mode=subchapters,
                         log_callback=lambda m: self.log.emit(m),
-                        progress_callback=on_flash_prog
+                        progress_callback=on_flash_prog,
+                        patweaks_opts=pat_opts,
+                        book_title=clean_title,
+                        author=self.params.get("author", ""),
+                        copyright_info=self.params.get("copyright_info", "")
                     )
 
                 self.progress.emit(100, 100, "Flash Completed ✓")
@@ -220,6 +256,25 @@ class PlayawayDialog(QDialog):
         self.planned_segments = []
         self.audio_info = None
         self.worker = None
+
+        self.author = ""
+        self.copyright_info = ""
+        try:
+            if hasattr(self.gui, "current_db") and hasattr(self.gui.current_db, "new_api"):
+                db = self.gui.current_db.new_api
+                authors = db.field_for("authors", book_id)
+                if authors:
+                    self.author = " & ".join(authors) if isinstance(authors, (list, tuple)) else str(authors)
+                publisher = db.field_for("publisher", book_id) or ""
+                pubdate = db.field_for("pubdate", book_id)
+                year_str = str(pubdate.year) if pubdate else ""
+                rights = db.field_for("rights", book_id) or ""
+                if rights:
+                    self.copyright_info = str(rights)
+                elif publisher:
+                    self.copyright_info = f"© {year_str} {publisher}".strip()
+        except Exception:
+            pass
 
         self.setWindowTitle(f"⚡ Send to Playaway — {book_title}")
         self.resize(850, 720)
@@ -318,6 +373,11 @@ class PlayawayDialog(QDialog):
         self.cb_subchapters.stateChanged.connect(lambda: self.update_estimates(replan=True))
         left_layout.addWidget(self.cb_subchapters)
 
+        self.cb_intro_offset = QCheckBox("1st Track is Intro (Part 00 / 0-Index)")
+        self.cb_intro_offset.setChecked(bool(cfg.get("intro_offset_mode", False)))
+        self.cb_intro_offset.stateChanged.connect(lambda: self.update_estimates(replan=True))
+        left_layout.addWidget(self.cb_intro_offset)
+
         settings_layout.addWidget(left_box)
 
         # Right Column: Speed & Bitrate
@@ -386,6 +446,7 @@ class PlayawayDialog(QDialog):
 
         self.tree_chapters = QTreeWidget()
         self.tree_chapters.setHeaderLabels(["#", "Track Title", "Timeframe", "Length", "Status"])
+        self.tree_chapters.setSelectionMode(QAbstractItemView.ExtendedSelection if hasattr(QAbstractItemView, 'ExtendedSelection') else 3)
         header = self.tree_chapters.header()
         if hasattr(QHeaderView, 'ResizeMode'):
             header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
@@ -393,12 +454,27 @@ class PlayawayDialog(QDialog):
             header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
             header.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
-        self.tree_chapters.setColumnWidth(0, 48)
+        self.tree_chapters.setColumnWidth(0, 75)
         self.tree_chapters.setColumnWidth(2, 195)
         self.tree_chapters.setColumnWidth(3, 75)
         self.tree_chapters.setColumnWidth(4, 75)
         self.tree_chapters.setAlternatingRowColors(True)
         preview_layout.addWidget(self.tree_chapters)
+
+        # Chapter Action Toolbar
+        tree_btn_layout = QHBoxLayout()
+        self.btn_merge_tracks = QPushButton("🔗 Merge Selected Tracks")
+        self.btn_merge_tracks.setToolTip("Select 2 adjacent tracks to merge into a single continuous track")
+        self.btn_merge_tracks.clicked.connect(self.merge_selected_tracks)
+        tree_btn_layout.addWidget(self.btn_merge_tracks)
+
+        self.btn_reset_chapters = QPushButton("🔁 Reset from Source")
+        self.btn_reset_chapters.setToolTip("Reset any custom track splits or merges back to original file markers")
+        self.btn_reset_chapters.clicked.connect(lambda: self.update_estimates(replan=True))
+        tree_btn_layout.addWidget(self.btn_reset_chapters)
+
+        tree_btn_layout.addStretch()
+        preview_layout.addLayout(tree_btn_layout)
 
         main_layout.addWidget(preview_box)
 
@@ -523,7 +599,69 @@ class PlayawayDialog(QDialog):
         fit_kbps = calculate_autofit_bitrate(dur_sec, target_capacity_mb=capacity_mb, speed=spd)
         self.spin_bitrate.setValue(fit_kbps)
         self.update_estimates(replan=False)
-        QMessageBox.information(self, "Auto-Fit Bitrate", f"Optimal Bitrate calculated: {fit_kbps} kbps based on {capacity_mb} MB total storage capacity.")
+        QMessageBox.information(self, "Auto-Fit Bitrate", f"Optimal Bitrate calculated: {fit_kbps} kbps based on {int(capacity_mb)} MB total storage capacity (~10 MB safety buffer reserved).")
+
+    def merge_selected_tracks(self):
+        """Merge two adjacent selected tracks in the preview table."""
+        if not self.planned_segments:
+            return
+
+        selected_items = self.tree_chapters.selectedItems()
+        if len(selected_items) != 2:
+            QMessageBox.information(
+                self, "Merge Tracks",
+                "Please select exactly two adjacent tracks in the preview table to merge (Hold Ctrl or Shift to select both rows)."
+            )
+            return
+
+        indices = sorted([self.tree_chapters.indexOfTopLevelItem(item) for item in selected_items])
+        idx_a, idx_b = indices[0], indices[1]
+
+        if idx_b != idx_a + 1:
+            QMessageBox.warning(
+                self, "Cannot Merge",
+                f"Can only merge two consecutive adjacent tracks (selected Track #{idx_a + 1} and Track #{idx_b + 1})."
+            )
+            return
+
+        seg_a = self.planned_segments[idx_a]
+        seg_b = self.planned_segments[idx_b]
+
+        if seg_a.get("is_silence") or seg_b.get("is_silence"):
+            QMessageBox.warning(self, "Cannot Merge", "Cannot merge the firmware end silence track.")
+            return
+
+        title_a = seg_a.get("title", f"Track {idx_a + 1}").strip()
+        title_b = seg_b.get("title", f"Track {idx_b + 1}").strip()
+        default_merged_title = f"{title_a} & {title_b}"
+
+        new_name, ok = QInputDialog.getText(
+            self, "Merge Tracks",
+            f"Merging adjacent tracks:\n• Track #{idx_a + 1}: {title_a}\n• Track #{idx_b + 1}: {title_b}\n\nEnter title for merged track:",
+            text=default_merged_title
+        )
+
+        if not ok:
+            return
+
+        merged_title = new_name.strip() if new_name.strip() else default_merged_title
+
+        try:
+            self.planned_segments = merge_segments(
+                segments=self.planned_segments,
+                idx_a=idx_a,
+                idx_b=idx_b,
+                new_title=merged_title,
+                clean_title=self.book_title,
+                subchapter_mode=self.cb_subchapters.isChecked(),
+                intro_offset_mode=self.cb_intro_offset.isChecked()
+            )
+            self.update_estimates(replan=False)
+            if idx_a < self.tree_chapters.topLevelItemCount():
+                item = self.tree_chapters.topLevelItem(idx_a)
+                self.tree_chapters.setCurrentItem(item)
+        except Exception as e:
+            QMessageBox.critical(self, "Merge Error", f"Failed to merge tracks: {e}")
 
     def update_estimates(self, replan=True):
         if not self.audio_info:
@@ -532,6 +670,7 @@ class PlayawayDialog(QDialog):
         split_mode = self.get_split_mode()
         split_mins = self.spin_split_mins.value()
         subchapters = self.cb_subchapters.isChecked()
+        intro_mode = self.cb_intro_offset.isChecked()
 
         # Check if file has embedded chapter markers
         has_chapters = bool(self.audio_info.get("files") and self.audio_info["files"][0].get("chapters"))
@@ -553,17 +692,21 @@ class PlayawayDialog(QDialog):
                 split_mode=split_mode,
                 split_mins=split_mins,
                 title=self.book_title,
-                subchapter_mode=subchapters
+                subchapter_mode=subchapters,
+                intro_offset_mode=intro_mode
             )
 
         spd = self.get_selected_speed()
         bitrate = self.spin_bitrate.value()
 
-        active_dur = sum(s.get("duration", 0.0) for s in self.planned_segments if not s.get("excluded", False))
+        audio_segments = [s for s in self.planned_segments if not (s.get("is_silence", False) or s.get("file") == "__SILENCE__")]
+        active_segments = [s for s in self.planned_segments if not s.get("excluded", False)]
+        active_audio_segments = [s for s in audio_segments if not s.get("excluded", False)]
+        active_dur = sum(s.get("duration", 0.0) for s in active_segments)
         est_mb = estimate_bitrate_size(active_dur, bitrate, speed=spd)
         eff_dur = active_dur / max(0.25, spd)
 
-        self.lbl_estimates.setText(f"Tracks: {len(self.planned_segments)} | Playtime: {format_duration(eff_dur)} @ {spd}x | Est. Size: ~{est_mb} MB")
+        self.lbl_estimates.setText(f"Tracks: {len(active_audio_segments)} | Playtime: {format_duration(eff_dur)} @ {spd}x | Est. Size: ~{est_mb} MB")
 
         # Duration warning check (>88m)
         long_warnings = check_track_duration_warnings(self.planned_segments, speed=spd)
@@ -576,17 +719,41 @@ class PlayawayDialog(QDialog):
         # Update Tree Widget
         self.tree_chapters.clear()
         for idx, seg in enumerate(self.planned_segments, 1):
+            is_silence = seg.get("is_silence", False) or seg.get("file") == "__SILENCE__"
+            if is_silence:
+                continue
+
             dur_sec = seg.get("duration", 0.0) / max(0.25, spd)
             dur_m = round(dur_sec / 60.0, 1)
             start_str = format_duration(seg.get("start", 0.0) / max(0.25, spd))
             end_str = format_duration(seg.get("end", 0.0) / max(0.25, spd))
             
-            is_long = dur_m > MAX_SAFE_TRACK_MINS and not seg.get("is_silence", False)
+            is_intro = seg.get("is_intro", False) or (intro_mode and idx == 1)
+
+            if is_intro:
+                idx_str = "000 (Intro)"
+            elif intro_mode:
+                idx_str = f"{idx - 1:03d}"
+            else:
+                idx_str = f"{idx:03d}"
+
+            raw_title = seg.get("title", "").strip()
+            if not raw_title or (raw_title.isdigit() and int(raw_title) == idx):
+                if is_intro:
+                    t_title = "Intro / Opening Credits"
+                elif intro_mode:
+                    t_title = f"Chapter {idx - 1}"
+                else:
+                    t_title = f"Chapter {idx}"
+            else:
+                t_title = raw_title
+
+            is_long = dur_m > MAX_SAFE_TRACK_MINS
             len_text = f"⚠️ {dur_m}m (>88m)" if is_long else f"{dur_m}m"
 
             item = QTreeWidgetItem([
-                f"{idx:03d}",
-                seg.get("title", f"Track {idx}"),
+                idx_str,
+                t_title,
                 f"{start_str} -> {end_str}",
                 len_text,
                 "Active"
@@ -618,6 +785,8 @@ class PlayawayDialog(QDialog):
             "preserve_pitch": self.cb_pitch.isChecked(),
             "subchapters": self.cb_subchapters.isChecked(),
             "title": self.book_title,
+            "author": getattr(self, "author", ""),
+            "copyright_info": getattr(self, "copyright_info", ""),
             "export_dir": os.path.join(target_dir, f"{self.book_title}_Playaway")
         }
         self.start_worker("export", params)
@@ -659,6 +828,8 @@ class PlayawayDialog(QDialog):
             "preserve_pitch": self.cb_pitch.isChecked(),
             "subchapters": self.cb_subchapters.isChecked(),
             "title": self.book_title,
+            "author": getattr(self, "author", ""),
+            "copyright_info": getattr(self, "copyright_info", ""),
             "drive_path": drive_path
         }
         self.start_worker("flash", params)
@@ -683,6 +854,7 @@ class PlayawayDialog(QDialog):
         cfg["playback_speed"] = self.get_selected_speed()
         cfg["preserve_pitch"] = self.cb_pitch.isChecked()
         cfg["subchapter_mode"] = self.cb_subchapters.isChecked()
+        cfg["intro_offset_mode"] = self.cb_intro_offset.isChecked()
         save_config(cfg)
         QMessageBox.information(
             self,
@@ -774,6 +946,7 @@ class QuickFlashDialog(QDialog):
         split_mins = int(self.cfg.get("split_mins", 15))
         pitch = bool(self.cfg.get("preserve_pitch", True))
         subchap = bool(self.cfg.get("subchapter_mode", False))
+        intro_mode = bool(self.cfg.get("intro_offset_mode", False))
 
         capacity_mb = (self.drives[0].get("total_mb", self.drives[0].get("free_mb", 105.0))) if self.drives else 105.0
         dur_sec = self.audio_info["total_duration_sec"]
@@ -802,7 +975,8 @@ class QuickFlashDialog(QDialog):
             split_mode=effective_split_mode,
             split_mins=split_mins,
             title=self.book_title,
-            subchapter_mode=subchap
+            subchapter_mode=subchap,
+            intro_offset_mode=intro_mode
         )
 
         active_dur = sum(s.get("duration", 0) for s in self.planned_segments)
@@ -980,9 +1154,44 @@ class PlayawayConfigWidget(QWidget):
         self.cb_subchap.setChecked(bool(self.cfg.get("subchapter_mode", False)))
         form.addWidget(self.cb_subchap, 4, 0, 1, 2)
 
+        self.cb_intro = QCheckBox("1st Track is Intro (Part 00 / 0-Index mode)")
+        self.cb_intro.setChecked(bool(self.cfg.get("intro_offset_mode", False)))
+        form.addWidget(self.cb_intro, 5, 0, 1, 2)
+
         self.cb_silence = QCheckBox("Append 5s silence track (Firmware 01:05 auto-power-off fix)")
         self.cb_silence.setChecked(bool(self.cfg.get("final_chapter_silence", True)))
-        form.addWidget(self.cb_silence, 5, 0, 1, 2)
+        form.addWidget(self.cb_silence, 6, 0, 1, 2)
+
+        # PATWEAKS.DAT Configuration Section
+        form.addWidget(QLabel("<b>PATWEAKS Revision:</b>"), 7, 0)
+        self.combo_pat_ver = QComboBox()
+        self.combo_pat_ver.addItems(["082002 (Modern Gen 3/HD)", "072002 (Legacy Gen 1/2)"])
+        cur_ver = self.cfg.get("patweaks_version", "082002")
+        self.combo_pat_ver.setCurrentIndex(1 if "072002" in cur_ver else 0)
+        form.addWidget(self.combo_pat_ver, 7, 1)
+
+        form.addWidget(QLabel("<b>Startup Volume (SLD):</b>"), 8, 0)
+        self.spin_pat_vol = QSpinBox()
+        self.spin_pat_vol.setRange(0, 100)
+        self.spin_pat_vol.setValue(int(self.cfg.get("patweaks_volume", 90)))
+        self.spin_pat_vol.setSuffix("%")
+        form.addWidget(self.spin_pat_vol, 8, 1)
+
+        form.addWidget(QLabel("<b>Sleep Profile (PUP):</b>"), 9, 0)
+        self.combo_pat_pup = QComboBox()
+        self.combo_pat_pup.addItems(["3 - Standard (5-10m auto-off)", "2 - Moderate (5m auto-off)", "1 - Aggressive (2m auto-off)", "0 - Kiosk / Always-On"])
+        cur_pup = int(self.cfg.get("patweaks_powerup", 3))
+        pup_idx_map = {3: 0, 2: 1, 1: 2, 0: 3}
+        self.combo_pat_pup.setCurrentIndex(pup_idx_map.get(cur_pup, 0))
+        form.addWidget(self.combo_pat_pup, 9, 1)
+
+        form.addWidget(QLabel("<b>Backlight Timer:</b>"), 10, 0)
+        self.combo_pat_bl = QComboBox()
+        self.combo_pat_bl.addItems(["20 - Factory 20s (BLN020/BLP020)", "10 - 10s", "30 - 30s", "5 - 5s", "0 - Disabled / Off"])
+        cur_bl = int(self.cfg.get("patweaks_backlight", 20))
+        bl_map = {20: 0, 10: 1, 30: 2, 5: 3, 0: 4}
+        self.combo_pat_bl.setCurrentIndex(bl_map.get(cur_bl, 0))
+        form.addWidget(self.combo_pat_bl, 10, 1)
 
         layout.addLayout(form)
         layout.addStretch()
@@ -997,7 +1206,12 @@ class PlayawayConfigWidget(QWidget):
         self.combo_speed.setCurrentText("1.0x (Normal)")
         self.cb_pitch.setChecked(bool(DEFAULT_SETTINGS.get("preserve_pitch", True)))
         self.cb_subchap.setChecked(bool(DEFAULT_SETTINGS.get("subchapter_mode", False)))
+        self.cb_intro.setChecked(bool(DEFAULT_SETTINGS.get("intro_offset_mode", False)))
         self.cb_silence.setChecked(bool(DEFAULT_SETTINGS.get("final_chapter_silence", True)))
+        self.combo_pat_ver.setCurrentIndex(0)
+        self.spin_pat_vol.setValue(90)
+        self.combo_pat_pup.setCurrentIndex(0)
+        self.combo_pat_bl.setCurrentIndex(0)
 
     def save_settings(self):
         self.cfg["split_mode"] = self.combo_mode.currentText()
@@ -1009,7 +1223,14 @@ class PlayawayConfigWidget(QWidget):
             self.cfg["playback_speed"] = 1.0
         self.cfg["preserve_pitch"] = self.cb_pitch.isChecked()
         self.cfg["subchapter_mode"] = self.cb_subchap.isChecked()
+        self.cfg["intro_offset_mode"] = self.cb_intro.isChecked()
         self.cfg["final_chapter_silence"] = self.cb_silence.isChecked()
+        self.cfg["patweaks_version"] = "072002" if "072002" in self.combo_pat_ver.currentText() else "082002"
+        self.cfg["patweaks_volume"] = self.spin_pat_vol.value()
+        pup_val_map = {0: 3, 1: 2, 2: 1, 3: 0}
+        self.cfg["patweaks_powerup"] = pup_val_map.get(self.combo_pat_pup.currentIndex(), 3)
+        bl_val_map = {0: 20, 1: 10, 2: 30, 3: 5, 4: 0}
+        self.cfg["patweaks_backlight"] = bl_val_map.get(self.combo_pat_bl.currentIndex(), 20)
         save_config(self.cfg)
 
 

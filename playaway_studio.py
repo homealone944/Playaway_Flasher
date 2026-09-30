@@ -70,6 +70,7 @@ def cmd_convert(args):
     bitrate = args.bitrate if args.bitrate != 10 else cfg.get("bitrate_kbps", 10)
     speed = args.speed if args.speed != 1.0 else cfg.get("playback_speed", 1.0)
     subchapters = args.subchapters or cfg.get("subchapter_mode", False)
+    intro_offset = getattr(args, "intro_offset", False) or cfg.get("intro_offset_mode", False)
     preserve_pitch = cfg.get("preserve_pitch", True)
 
     enc_exe, _ = setup_encoder()
@@ -88,7 +89,8 @@ def cmd_convert(args):
         split_mode=split_mode,
         split_mins=split_mins,
         title=args.title or info["title"],
-        subchapter_mode=subchapters
+        subchapter_mode=subchapters,
+        intro_offset_mode=intro_offset
     )
 
     # Check for tracks exceeding 88 minutes (Firmware 01:03 freeze limit)
@@ -121,9 +123,28 @@ def cmd_convert(args):
 
     # Write PATWEAKS.DAT
     pat_file = output_dir / "PATWEAKS.DAT"
-    pat_content = generate_patweaks_content(len(segments), subchapters)
+    pat_opts = {
+        "subchapter_mode": subchapters,
+        "version": getattr(args, "patweaks_version", None) or cfg.get("patweaks_version", "082002"),
+        "volume": getattr(args, "patweaks_volume", None) or cfg.get("patweaks_volume", 90),
+        "speed": getattr(args, "patweaks_speed", None) or cfg.get("patweaks_speed", 80),
+        "powerup_profile": getattr(args, "patweaks_powerup", None) or cfg.get("patweaks_powerup", 3),
+        "backlight_sec": getattr(args, "patweaks_backlight", None) or cfg.get("patweaks_backlight", 0),
+        "custom_override": getattr(args, "patweaks_custom", None) or cfg.get("patweaks_custom", None)
+    }
+    pat_content = generate_patweaks_content(len(segments), **pat_opts)
     with open(pat_file, "wb") as f:
         f.write(pat_content.encode("ascii"))
+
+    book_title = args.title or info["title"]
+    author = getattr(args, "author", None) or info.get("author", "")
+    copyright_info = getattr(args, "copyright", None) or info.get("copyright", "")
+
+    if author or copyright_info:
+        from playaway_core import generate_copyright_file_content
+        cprt_file = output_dir / "COPYRIGHT.TXT"
+        with open(cprt_file, "w", encoding="utf-8") as f:
+            f.write(generate_copyright_file_content(book_title, author=author, copyright_info=copyright_info, track_count=len(segments)))
 
     print(f"\n[+] Conversion finished! Files written to: {output_dir.resolve()}")
 
@@ -139,15 +160,31 @@ def cmd_flash(args):
     bitrate = args.bitrate if args.bitrate != 10 else cfg.get("bitrate_kbps", 10)
     speed = args.speed if args.speed != 1.0 else cfg.get("playback_speed", 1.0)
     subchapters = args.subchapters or cfg.get("subchapter_mode", False)
+    intro_offset = getattr(args, "intro_offset", False) or cfg.get("intro_offset_mode", False)
     preserve_pitch = cfg.get("preserve_pitch", True)
 
+    pat_opts = {
+        "subchapter_mode": subchapters,
+        "version": getattr(args, "patweaks_version", None) or cfg.get("patweaks_version", "082002"),
+        "volume": getattr(args, "patweaks_volume", None) or cfg.get("patweaks_volume", 90),
+        "speed": getattr(args, "patweaks_speed", None) or cfg.get("patweaks_speed", 80),
+        "powerup_profile": getattr(args, "patweaks_powerup", None) or cfg.get("patweaks_powerup", 3),
+        "backlight_sec": getattr(args, "patweaks_backlight", None) or cfg.get("patweaks_backlight", 0),
+        "custom_override": getattr(args, "patweaks_custom", None) or cfg.get("patweaks_custom", None)
+    }
+
     info = inspect_audio_source(input_path)
+    book_title = args.title or info["title"]
+    author = getattr(args, "author", None) or info.get("author", "")
+    copyright_info = getattr(args, "copyright", None) or info.get("copyright", "")
+
     segments = plan_chapters(
         input_path=input_path,
         split_mode=split_mode,
         split_mins=split_mins,
-        title=args.title or info["title"],
-        subchapter_mode=subchapters
+        title=book_title,
+        subchapter_mode=subchapters,
+        intro_offset_mode=intro_offset
     )
 
     # Check for tracks exceeding 88 minutes (Firmware 01:03 freeze limit)
@@ -192,7 +229,11 @@ def cmd_flash(args):
             awb_dir=temp_dir,
             track_count=len(segments),
             subchapter_mode=subchapters,
-            log_callback=log_cli
+            log_callback=log_cli,
+            patweaks_opts=pat_opts,
+            book_title=book_title,
+            author=author,
+            copyright_info=copyright_info
         )
 
     print(f"\n[+] Flash completed successfully! Safe to disconnect drive {drive_path}.")
@@ -231,11 +272,20 @@ def main():
     p_conv.add_argument("-o", "--output", required=True, help="Output folder to store .awb tracks and PATWEAKS.DAT")
     p_conv.add_argument("-c", "--config", help="Path to custom JSON settings file (default: playaway_config.json)")
     p_conv.add_argument("--title", help="Custom audiobook title")
+    p_conv.add_argument("--author", help="Author / Narrator name")
+    p_conv.add_argument("--copyright", help="Copyright notice text")
     p_conv.add_argument("--split-mode", choices=["duration", "chapters", "none"], default="duration", help="Chapter split method")
     p_conv.add_argument("--split-mins", type=int, default=15, help="Minutes per track if split-mode=duration")
     p_conv.add_argument("--bitrate", type=int, default=10, help="AMR-WB+ bitrate in kbps (10 to 36)")
     p_conv.add_argument("--speed", type=float, default=1.0, help="Playback speed factor (e.g. 1.25 for 1.25x speed)")
     p_conv.add_argument("--subchapters", action="store_true", help="Enable subchapter mode (AF* header)")
+    p_conv.add_argument("--intro-offset", action="store_true", help="Treat 1st track as Intro (Part 00 / 0-Index)")
+    p_conv.add_argument("--patweaks-version", choices=["082002", "072002"], help="PATWEAKS header version")
+    p_conv.add_argument("--patweaks-volume", type=int, help="Startup volume percentage (0-100)")
+    p_conv.add_argument("--patweaks-speed", type=int, help="Startup speed code (50-120, 80=1.0x)")
+    p_conv.add_argument("--patweaks-powerup", type=int, help="Power-up sleep profile (0-9, 3=Standard)")
+    p_conv.add_argument("--patweaks-backlight", type=int, help="Backlight seconds (0=Default, 20=Factory)")
+    p_conv.add_argument("--patweaks-custom", help="Custom raw PATWEAKS header string override")
     p_conv.set_defaults(func=cmd_convert)
 
     # Subcommand: flash
@@ -244,11 +294,20 @@ def main():
     p_flash.add_argument("-d", "--drive", required=True, help="Target Playaway USB drive letter or path (e.g. E:\\ or /media/playaway)")
     p_flash.add_argument("-c", "--config", help="Path to custom JSON settings file (default: playaway_config.json)")
     p_flash.add_argument("--title", help="Custom audiobook title")
+    p_flash.add_argument("--author", help="Author / Narrator name")
+    p_flash.add_argument("--copyright", help="Copyright notice text")
     p_flash.add_argument("--split-mode", choices=["duration", "chapters", "none"], default="duration", help="Chapter split method")
     p_flash.add_argument("--split-mins", type=int, default=15, help="Minutes per track if split-mode=duration")
     p_flash.add_argument("--bitrate", type=int, default=10, help="AMR-WB+ bitrate in kbps (10 to 36)")
     p_flash.add_argument("--speed", type=float, default=1.0, help="Playback speed factor (e.g. 1.25 for 1.25x speed)")
     p_flash.add_argument("--subchapters", action="store_true", help="Enable subchapter mode (AF* header)")
+    p_flash.add_argument("--intro-offset", action="store_true", help="Treat 1st track as Intro (Part 00 / 0-Index)")
+    p_flash.add_argument("--patweaks-version", choices=["082002", "072002"], help="PATWEAKS header version")
+    p_flash.add_argument("--patweaks-volume", type=int, help="Startup volume percentage (0-100)")
+    p_flash.add_argument("--patweaks-speed", type=int, help="Startup speed code (50-120, 80=1.0x)")
+    p_flash.add_argument("--patweaks-powerup", type=int, help="Power-up sleep profile (0-9, 3=Standard)")
+    p_flash.add_argument("--patweaks-backlight", type=int, help="Backlight seconds (0=Default, 20=Factory)")
+    p_flash.add_argument("--patweaks-custom", help="Custom raw PATWEAKS header string override")
     p_flash.add_argument("-y", "--yes", action="store_true", help="Skip confirmation prompt before wiping drive")
     p_flash.set_defaults(func=cmd_flash)
 
@@ -264,7 +323,6 @@ def main():
     elif hasattr(args, "func"):
         args.func(args)
     else:
-        parser.print_help()
         parser.print_help()
 
 

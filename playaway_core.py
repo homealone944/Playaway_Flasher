@@ -154,15 +154,22 @@ def detect_playaway_drives(allow_large_drives=False):
     return drives
 
 
-def generate_copy_instructions(book_title, track_count):
+def generate_copy_instructions(book_title, track_count, author=None, copyright_info=None):
     """
     Generate text for README_HOW_TO_COPY.txt when exporting to a local folder.
     """
+    meta_lines = [f"Book Title   : {book_title}"]
+    if author and str(author).strip():
+        meta_lines.append(f"Author       : {str(author).strip()}")
+    if copyright_info and str(copyright_info).strip():
+        meta_lines.append(f"Copyright    : {str(copyright_info).strip()}")
+    meta_lines.append(f"Total Tracks : {track_count}")
+    meta_block = "\n".join(meta_lines)
+
     return f"""===================================================================
 PLAYAWAY AUDIOBOOK MANUAL COPY INSTRUCTIONS
 ===================================================================
-Book Title : {book_title}
-Total Tracks: {track_count}
+{meta_block}
 
 To manually load this audiobook onto your Playaway player:
 
@@ -174,12 +181,28 @@ To manually load this audiobook onto your Playaway player:
    directory of your Playaway drive:
    - All {track_count} .awb track files
    - PATWEAKS.DAT
+   - COPYRIGHT.TXT (if present)
 5. CRITICAL: DO NOT create a subfolder on the Playaway player! 
    All .awb files and PATWEAKS.DAT must sit directly in the top-level 
    root directory (e.g., E:\\PATWEAKS.DAT and E:\\0001 {book_title} 0000.awb).
 6. Safely Eject / Sync the USB drive before unplugging.
 ===================================================================
 """
+
+
+def generate_copyright_file_content(book_title, author=None, copyright_info=None, track_count=None):
+    """
+    Generate content for COPYRIGHT.TXT / INFO.TXT on the Playaway device.
+    """
+    lines = [f"Title: {book_title}"]
+    if author and str(author).strip():
+        lines.append(f"Author: {str(author).strip()}")
+    if copyright_info and str(copyright_info).strip():
+        lines.append(f"Copyright: {str(copyright_info).strip()}")
+    if track_count:
+        lines.append(f"Tracks: {track_count}")
+    lines.append("\nFormatted for Playaway Audiobook Player.")
+    return "\r\n".join(lines) + "\r\n"
 
 
 def sync_drive(drive_path):
@@ -234,6 +257,9 @@ def inspect_audio_source(input_path):
 
     total_duration = 0.0
     file_details = []
+    parsed_title = ""
+    parsed_author = ""
+    parsed_copyright = ""
 
     for f in files:
         cmd = [
@@ -246,6 +272,13 @@ def inspect_audio_source(input_path):
             fmt = data.get("format", {})
             dur = float(fmt.get("duration", 0.0))
             chapters = data.get("chapters", [])
+            tags = fmt.get("tags", {})
+            if not parsed_title:
+                parsed_title = tags.get("title") or tags.get("album") or ""
+            if not parsed_author:
+                parsed_author = tags.get("artist") or tags.get("album_artist") or tags.get("composer") or tags.get("author") or tags.get("narrator") or ""
+            if not parsed_copyright:
+                parsed_copyright = tags.get("copyright") or tags.get("COPYRIGHT") or tags.get("cprt") or tags.get("date") or tags.get("year") or ""
             
             total_duration += dur
             file_details.append({
@@ -263,8 +296,12 @@ def inspect_audio_source(input_path):
         else:
             file_details.append({"path": str(f), "duration": 0.0, "chapters": []})
 
+    title = parsed_title or (p.stem if p.is_file() else p.name)
+
     return {
-        "title": p.stem if p.is_file() else p.name,
+        "title": title,
+        "author": parsed_author,
+        "copyright": parsed_copyright,
         "is_dir": p.is_dir(),
         "files": file_details,
         "total_duration_sec": total_duration,
@@ -292,9 +329,10 @@ def estimate_bitrate_size(duration_sec, bitrate_kbps=10, speed=1.0):
     return round(mb * 1.05, 2)
 
 
-def calculate_autofit_bitrate(duration_sec, target_capacity_mb=105.0, speed=1.0, target_free_mb=None):
+def calculate_autofit_bitrate(duration_sec, target_capacity_mb=105.0, speed=1.0, target_free_mb=None, reserve_free_mb=10.0):
     """
-    Calculate maximum safe bitrate (between 10 and 36 kbps) to fill target Playaway storage.
+    Calculate maximum safe bitrate (between 10 and 36 kbps) to fill target Playaway storage,
+    keeping ~10MB free by default for FAT tables, PATWEAKS.DAT, and runtime state bookmark files.
     """
     effective_dur = duration_sec / max(0.25, speed)
     if effective_dur <= 0:
@@ -302,8 +340,11 @@ def calculate_autofit_bitrate(duration_sec, target_capacity_mb=105.0, speed=1.0,
     
     capacity = target_free_mb if target_free_mb is not None else target_capacity_mb
     
-    # Reserve 5% safety margin for FAT table overhead & PATWEAKS.DAT
-    usable_bytes = (capacity * 1024 * 1024) * 0.95
+    # Reserve ~10MB safety buffer (ensuring usable capacity is at least 5MB)
+    usable_mb = max(5.0, capacity - reserve_free_mb)
+    
+    # Reserve 5% margin for container & FAT entry overhead
+    usable_bytes = (usable_mb * 1024 * 1024) * 0.95
     usable_bits = usable_bytes * 8
     
     calc_bitrate_bps = usable_bits / effective_dur
@@ -347,7 +388,15 @@ build_atempo_filter = build_speed_filter
 # Chapter Splitting & Segment Planner
 # ==============================================================================
 
-def plan_chapters(input_path, split_mode="duration", split_mins=15, title="Audiobook", subchapter_mode=False, final_chapter_silence=True):
+def plan_chapters(
+    input_path,
+    split_mode="duration",
+    split_mins=15,
+    title="Audiobook",
+    subchapter_mode=False,
+    final_chapter_silence=True,
+    intro_offset_mode=False
+):
     """
     Plan chapter segments based on split_mode ('none', 'duration', 'chapters').
     Returns a list of segment dicts:
@@ -365,23 +414,18 @@ def plan_chapters(input_path, split_mode="duration", split_mins=15, title="Audio
             start = ch["start"]
             end = ch["end"]
             if end > start:
-                track_num = f"{idx + 1:04d}"
-                out_name = f"{track_num} {clean_title} 0000.awb"
-                if subchapter_mode:
-                    out_name = f"001{idx+1:03d} {clean_title} 0000.awb"
                 segments.append({
                     "file": f_path,
                     "start": start,
                     "end": end,
                     "duration": end - start,
-                    "out_name": out_name,
                     "title": ch["title"]
                 })
 
     elif split_mode == "duration" or (split_mode == "chapters" and not segments):
         # Split into fixed duration blocks (e.g. 15 mins)
         target_dur = max(60, int(split_mins * 60))
-        track_idx = 1
+        part_idx = 1
 
         for f_item in info["files"]:
             f_path = f_item["path"]
@@ -392,20 +436,14 @@ def plan_chapters(input_path, split_mode="duration", split_mins=15, title="Audio
             curr = 0.0
             while curr < f_dur:
                 seg_end = min(curr + target_dur, f_dur)
-                track_num = f"{track_idx:04d}"
-                out_name = f"{track_num} {clean_title} 0000.awb"
-                if subchapter_mode:
-                    out_name = f"001{track_idx:03d} {clean_title} 0000.awb"
-
                 segments.append({
                     "file": f_path,
                     "start": curr,
                     "end": seg_end,
                     "duration": seg_end - curr,
-                    "out_name": out_name,
-                    "title": f"Part {track_idx}"
+                    "title": f"Part {part_idx}"
                 })
-                track_idx += 1
+                part_idx += 1
                 curr = seg_end
 
     else:
@@ -413,27 +451,32 @@ def plan_chapters(input_path, split_mode="duration", split_mins=15, title="Audio
         for idx, f_item in enumerate(info["files"]):
             f_path = f_item["path"]
             f_dur = f_item["duration"]
-            track_num = f"{idx + 1:04d}"
-            out_name = f"{track_num} {clean_title} 0000.awb"
-            if subchapter_mode:
-                out_name = f"001{idx+1:03d} {clean_title} 0000.awb"
-
             segments.append({
                 "file": f_path,
                 "start": 0.0,
                 "end": f_dur,
                 "duration": f_dur,
-                "out_name": out_name,
                 "title": Path(f_path).stem
             })
 
+    # Assign Sequential Track Filenames (with optional Intro 0-index offset)
+    for idx, seg in enumerate(segments):
+        if intro_offset_mode:
+            track_num = f"{idx:04d}"
+            sub_num = f"001{idx:03d}"
+            seg["is_intro"] = (idx == 0)
+        else:
+            track_num = f"{idx + 1:04d}"
+            sub_num = f"001{idx + 1:03d}"
+            seg["is_intro"] = False
+
+        seg["out_name"] = f"{sub_num} {clean_title} 0000.awb" if subchapter_mode else f"{track_num} {clean_title} 0000.awb"
+
     if segments and final_chapter_silence:
         # Append dedicated 5-second silent track (end_silence) to guarantee clean hardware auto-stop
-        silence_idx = len(segments) + 1
+        silence_idx = len(segments) if intro_offset_mode else len(segments) + 1
         track_num = f"{silence_idx:04d}"
-        out_name = f"{track_num} {clean_title} 0000.awb"
-        if subchapter_mode:
-            out_name = f"001{silence_idx:03d} {clean_title} 0000.awb"
+        out_name = f"001{silence_idx:03d} {clean_title} 0000.awb" if subchapter_mode else f"{track_num} {clean_title} 0000.awb"
 
         segments.append({
             "file": "__SILENCE__",
@@ -449,6 +492,78 @@ def plan_chapters(input_path, split_mode="duration", split_mins=15, title="Audio
         segments[-1]["is_last"] = True
 
     return segments
+
+
+def merge_segments(segments, idx_a, idx_b, new_title=None, clean_title="Audiobook", subchapter_mode=False, intro_offset_mode=False):
+    """
+    Merge two adjacent segments into a single continuous segment.
+    """
+    if idx_a > idx_b:
+        idx_a, idx_b = idx_b, idx_a
+
+    if idx_b != idx_a + 1 or idx_a < 0 or idx_b >= len(segments):
+        raise ValueError("Can only merge two consecutive adjacent tracks.")
+
+    seg_a = segments[idx_a]
+    seg_b = segments[idx_b]
+
+    if seg_a.get("is_silence") or seg_b.get("is_silence"):
+        raise ValueError("Cannot merge the firmware end silence track.")
+
+    title_a = seg_a.get("title", f"Track {idx_a + 1}")
+    title_b = seg_b.get("title", f"Track {idx_b + 1}")
+    merged_title = new_title or f"{title_a} & {title_b}"
+
+    # Same source file merge
+    if seg_a.get("file") == seg_b.get("file") and not seg_a.get("concat_parts") and not seg_b.get("concat_parts"):
+        merged_seg = {
+            "file": seg_a["file"],
+            "start": seg_a["start"],
+            "end": seg_b["end"],
+            "duration": seg_b["end"] - seg_a["start"],
+            "title": merged_title,
+            "excluded": False
+        }
+    else:
+        # Cross-file / complex concat merge
+        parts_a = seg_a.get("concat_parts", [dict(seg_a)])
+        parts_b = seg_b.get("concat_parts", [dict(seg_b)])
+        merged_seg = {
+            "file": seg_a["file"],
+            "start": 0.0,
+            "end": 0.0,
+            "duration": seg_a["duration"] + seg_b["duration"],
+            "title": merged_title,
+            "concat_parts": parts_a + parts_b,
+            "excluded": False
+        }
+
+    new_segments = segments[:idx_a] + [merged_seg] + segments[idx_b + 1:]
+
+    # Renumber output filenames
+    for idx, seg in enumerate(new_segments):
+        if seg.get("is_silence"):
+            silence_idx = idx if intro_offset_mode else idx + 1
+            seg["out_name"] = f"001{silence_idx:03d} {clean_title} 0000.awb" if subchapter_mode else f"{silence_idx:04d} {clean_title} 0000.awb"
+            continue
+
+        if intro_offset_mode:
+            track_num = f"{idx:04d}"
+            sub_num = f"001{idx:03d}"
+            seg["is_intro"] = (idx == 0)
+        else:
+            track_num = f"{idx + 1:04d}"
+            sub_num = f"001{idx + 1:03d}"
+            seg["is_intro"] = False
+
+        seg["out_name"] = f"{sub_num} {clean_title} 0000.awb" if subchapter_mode else f"{track_num} {clean_title} 0000.awb"
+
+    if new_segments:
+        for s in new_segments:
+            s["is_last"] = False
+        new_segments[-1]["is_last"] = True
+
+    return new_segments
 
 
 MAX_SAFE_TRACK_MINS = 88.0  # Firmware 01:03 freeze limit (~1 hour 28 minutes)
@@ -518,10 +633,41 @@ def convert_segment_to_awb(segment, output_dir, bitrate_kbps=10, speed=1.0, pres
                 "-i", "anullsrc=channel_layout=mono:sample_rate=44100",
                 "-t", "5.0"
             ])
+        elif segment.get("concat_parts"):
+            # Multi-part concat (e.g. merged tracks across files or cuts)
+            filter_complex = []
+            input_tags = []
+            for i, part in enumerate(segment["concat_parts"]):
+                ff_cmd.extend(["-i", part["file"]])
+                trim_parts = []
+                p_start = part.get("start", 0.0)
+                p_end = part.get("end", 0.0)
+                if p_start > 0:
+                    trim_parts.append(f"start={p_start}")
+                if p_end > 0 and p_end > p_start:
+                    trim_parts.append(f"end={p_end}")
+                trim_filter = f"atrim={':'.join(trim_parts)}," if trim_parts else ""
+                filter_complex.append(f"[{i}:a]{trim_filter}asetpts=PTS-STARTPTS[a{i}]")
+                input_tags.append(f"[a{i}]")
+
+            concat_n = len(input_tags)
+            filter_complex.append(f"{''.join(input_tags)}concat=n={concat_n}:v=0:a=1[c_out]")
+
+            speed_filter = build_speed_filter(speed, preserve_pitch=preserve_pitch)
+            if speed_filter:
+                filter_complex.append(f"[c_out]{speed_filter}[final_out]")
+                map_tag = "[final_out]"
+            else:
+                map_tag = "[c_out]"
+
+            ff_cmd.extend([
+                "-filter_complex", ";".join(filter_complex),
+                "-map", map_tag
+            ])
         else:
-            if segment["start"] > 0:
+            if segment.get("start", 0) > 0:
                 ff_cmd.extend(["-ss", str(segment["start"])])
-            if segment["end"] > 0 and segment["end"] > segment["start"]:
+            if segment.get("end", 0) > 0 and segment["end"] > segment.get("start", 0):
                 ff_cmd.extend(["-to", str(segment["end"])])
 
             ff_cmd.extend([
@@ -677,19 +823,66 @@ def convert_all_segments_parallel(segments, output_dir, bitrate_kbps=10, speed=1
 # PATWEAKS.DAT Generator
 # ==============================================================================
 
-def generate_patweaks_content(track_count, subchapter_mode=False):
+def generate_patweaks_content(
+    track_count,
+    subchapter_mode=False,
+    version="082002",
+    volume=90,
+    speed=80,
+    powerup_profile=3,
+    backlight_sec=20,
+    custom_override=None
+):
     """
-    Generate valid PATWEAKS.DAT content with mandatory header, NMDxxx track count, and CRLF line endings.
+    Generate valid PATWEAKS.DAT content with customizable header options, NMDxxx track count, and CRLF line endings.
     """
-    # Header format: AWBVOL + flags + NMDxxx + CRLF
-    nmd_str = f"NMD{track_count:03d}"
-    
-    lines = []
-    lines.append(f"AWBVOL082002SLD090080PUP003{nmd_str}")
-    if subchapter_mode:
-        lines.append("AF*")
-        
-    content = "\r\n".join(lines) + "\r\n"
+    if custom_override and str(custom_override).strip():
+        clean = str(custom_override).strip().replace("\r", "").replace("\n", "")
+        # If user included NMD in custom string, use as is; otherwise append NMD
+        if "NMD" not in clean.upper():
+            clean += f"NMD{int(track_count):03d}"
+        return f"{clean}\r\n"
+
+    # Version format: AWBVOL082002 or AWBVOL072002
+    ver_str = str(version).strip() if str(version).strip() in ("072002", "082002") else "082002"
+
+    # Volume (0-100) & Speed (50-120) -> SLDxxx yyy
+    try:
+        vol_int = max(0, min(100, int(volume)))
+    except (ValueError, TypeError):
+        vol_int = 90
+
+    try:
+        spd_int = max(50, min(120, int(speed)))
+    except (ValueError, TypeError):
+        spd_int = 80
+
+    sld_str = f"SLD{vol_int:03d}{spd_int:03d}"
+
+    # Power-Up profile (0-9) -> PUPxxx
+    try:
+        pup_int = max(0, min(9, int(powerup_profile)))
+    except (ValueError, TypeError):
+        pup_int = 3
+    pup_str = f"PUP{pup_int:03d}"
+
+    # Optional Subchapter Mode -> AF*
+    af_flag = "AF*" if subchapter_mode else ""
+
+    # Optional Backlight timers -> BLNxxxBLPxxx
+    bl_str = ""
+    try:
+        bl_val = int(backlight_sec)
+        if bl_val > 0:
+            sec = max(1, min(999, bl_val))
+            bl_str = f"BLN{sec:03d}BLP{sec:03d}"
+    except (ValueError, TypeError):
+        pass
+
+    # Total Track Count -> NMDxxx
+    nmd_str = f"NMD{int(track_count):03d}"
+
+    content = f"AWBVOL{ver_str}{sld_str}{pup_str}{af_flag}{bl_str}{nmd_str}\r\n"
     return content
 
 
@@ -733,9 +926,20 @@ def wipe_playaway_drive(drive_path, log_callback=None):
     sync_drive(str(target))
 
 
-def flash_playaway(drive_path, awb_dir, track_count, subchapter_mode=False, log_callback=None, progress_callback=None):
+def flash_playaway(
+    drive_path,
+    awb_dir,
+    track_count,
+    subchapter_mode=False,
+    log_callback=None,
+    progress_callback=None,
+    patweaks_opts=None,
+    book_title="Audiobook",
+    author=None,
+    copyright_info=None
+):
     """
-    Wipe target drive, copy newly encoded .awb files, write PATWEAKS.DAT, and flush buffers.
+    Wipe target drive, copy newly encoded .awb files, write PATWEAKS.DAT, COPYRIGHT.TXT, and flush buffers.
     """
     drive_p = Path(drive_path)
     awb_p = Path(awb_dir)
@@ -764,7 +968,11 @@ def flash_playaway(drive_path, awb_dir, track_count, subchapter_mode=False, log_
 
     # 3. Write PATWEAKS.DAT
     patweaks_file = drive_p / "PATWEAKS.DAT"
-    pat_content = generate_patweaks_content(len(awb_files), subchapter_mode)
+    opts = dict(patweaks_opts) if patweaks_opts else {}
+    if "subchapter_mode" not in opts:
+        opts["subchapter_mode"] = subchapter_mode
+
+    pat_content = generate_patweaks_content(len(awb_files), **opts)
     
     with open(patweaks_file, "wb") as f:
         f.write(pat_content.encode("ascii"))
@@ -772,7 +980,16 @@ def flash_playaway(drive_path, awb_dir, track_count, subchapter_mode=False, log_
     if log_callback:
         log_callback(f"Wrote PATWEAKS.DAT with NMD{len(awb_files):03d}")
 
-    # 4. Flush OS disk buffers
+    # 4. Write COPYRIGHT.TXT (if metadata provided)
+    if (author and str(author).strip()) or (copyright_info and str(copyright_info).strip()):
+        cprt_file = drive_p / "COPYRIGHT.TXT"
+        cprt_text = generate_copyright_file_content(book_title, author=author, copyright_info=copyright_info, track_count=len(awb_files))
+        with open(cprt_file, "w", encoding="utf-8") as f:
+            f.write(cprt_text)
+        if log_callback:
+            log_callback("Wrote COPYRIGHT.TXT metadata to drive.")
+
+    # 5. Flush OS disk buffers
     if log_callback:
         log_callback("Flushing storage buffers & syncing drive...")
     sync_drive(str(drive_p))
@@ -832,10 +1049,17 @@ DEFAULT_SETTINGS = {
     "split_mode": "duration",
     "split_mins": 15,
     "subchapter_mode": False,
+    "intro_offset_mode": False,
     "playback_speed": 1.0,
     "preserve_pitch": True,
     "bitrate_kbps": 10,
-    "final_chapter_silence": True
+    "final_chapter_silence": True,
+    "patweaks_version": "082002",
+    "patweaks_volume": 90,
+    "patweaks_speed": 80,
+    "patweaks_powerup": 3,
+    "patweaks_backlight": 20,
+    "patweaks_custom": ""
 }
 
 def load_config(config_path=None):

@@ -2,8 +2,15 @@
     "split_mode": "chapters",
     "split_mins": 25,
     "subchapter_mode": true,
-    "playback_speed": 1.0,
+    "intro_offset_mode": true,
+    "playback_speed": 1.5,
     "preserve_pitch": true,
-    "bitrate_kbps": "auto",
-    "final_chapter_silence": true
+    "bitrate_kbps": 23,
+    "final_chapter_silence": true,
+    "patweaks_version": "082002",
+    "patweaks_volume": 90,
+    "patweaks_speed": 100,
+    "patweaks_powerup": 1,
+    "patweaks_backlight": 10,
+    "patweaks_custom": ""
 }

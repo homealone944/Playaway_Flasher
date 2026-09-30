@@ -27,6 +27,7 @@ from playaway_core import (
     detect_playaway_drives,
     inspect_audio_source,
     plan_chapters,
+    merge_segments,
     check_track_duration_warnings,
     MAX_SAFE_TRACK_MINS,
     convert_all_segments_parallel,
@@ -35,6 +36,7 @@ from playaway_core import (
     backup_playaway_drive,
     is_system_drive,
     generate_copy_instructions,
+    generate_copyright_file_content,
     estimate_bitrate_size,
     calculate_autofit_bitrate,
     build_speed_filter as build_atempo_filter,
@@ -70,10 +72,13 @@ class PlayawayStudioGUI(tk.Tk):
         cfg = load_config()
         self.input_path = tk.StringVar(value="")
         self.book_title = tk.StringVar(value="My Audiobook")
+        self.book_author = tk.StringVar(value="")
+        self.book_copyright = tk.StringVar(value="")
         self.split_mode = tk.StringVar(value=cfg.get("split_mode", "duration"))
         self.split_mins = tk.IntVar(value=cfg.get("split_mins", 15))
         self.split_mins.trace_add("write", lambda *a: self.after_idle(self.on_split_mins_changed))
         self.subchapter_mode = tk.BooleanVar(value=cfg.get("subchapter_mode", False))
+        self.intro_offset_mode = tk.BooleanVar(value=cfg.get("intro_offset_mode", False))
         cfg_bit = cfg.get("bitrate_kbps", "auto")
         if str(cfg_bit).lower() == "auto":
             self.bitrate_is_auto = tk.BooleanVar(value=True)
@@ -89,6 +94,14 @@ class PlayawayStudioGUI(tk.Tk):
         self.preserve_pitch = tk.BooleanVar(value=cfg.get("preserve_pitch", True))
         self.final_chapter_silence = tk.BooleanVar(value=cfg.get("final_chapter_silence", True))
         self.selected_drive = tk.StringVar(value="")
+
+        # PATWEAKS.DAT Configuration Variables
+        self.patweaks_version = tk.StringVar(value=cfg.get("patweaks_version", DEFAULT_SETTINGS.get("patweaks_version", "082002")))
+        self.patweaks_volume = tk.IntVar(value=cfg.get("patweaks_volume", DEFAULT_SETTINGS.get("patweaks_volume", 90)))
+        self.patweaks_speed = tk.IntVar(value=cfg.get("patweaks_speed", DEFAULT_SETTINGS.get("patweaks_speed", 80)))
+        self.patweaks_powerup = tk.IntVar(value=cfg.get("patweaks_powerup", DEFAULT_SETTINGS.get("patweaks_powerup", 3)))
+        self.patweaks_backlight = tk.IntVar(value=cfg.get("patweaks_backlight", DEFAULT_SETTINGS.get("patweaks_backlight", 20)))
+        self.patweaks_custom = tk.StringVar(value=cfg.get("patweaks_custom", DEFAULT_SETTINGS.get("patweaks_custom", "")))
         
         self.audio_info = None
         self.planned_segments = []
@@ -398,6 +411,32 @@ class PlayawayStudioGUI(tk.Tk):
         self.info_label = ttk.Label(input_card, text="Select any M4B, MP3, M4A, or WAV file/folder on your computer.", style="Card.TLabel", font=("Segoe UI", 9, "italic"), foreground="#a6adc8")
         self.info_label.pack(fill="x", pady=(6, 0))
 
+        # Metadata Row (Title, Author, Copyright)
+        meta_grid = ttk.Frame(input_card, style="Card.TFrame")
+        meta_grid.pack(fill="x", pady=(8, 0))
+
+        # Title
+        f_title = ttk.Frame(meta_grid, style="Card.TFrame")
+        f_title.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ttk.Label(f_title, text="📖 Book Title:", style="Card.TLabel", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        self.entry_title = ttk.Entry(f_title, textvariable=self.book_title, font=("Segoe UI", 9))
+        self.entry_title.pack(fill="x")
+        self.entry_title.bind("<KeyRelease>", lambda e: self.update_estimates(replan=True))
+
+        # Author
+        f_author = ttk.Frame(meta_grid, style="Card.TFrame")
+        f_author.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ttk.Label(f_author, text="✍️ Author / Narrator:", style="Card.TLabel", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        self.entry_author = ttk.Entry(f_author, textvariable=self.book_author, font=("Segoe UI", 9))
+        self.entry_author.pack(fill="x")
+
+        # Copyright
+        f_cprt = ttk.Frame(meta_grid, style="Card.TFrame")
+        f_cprt.pack(side="left", fill="x", expand=True)
+        ttk.Label(f_cprt, text="©️ Copyright Info:", style="Card.TLabel", font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        self.entry_copyright = ttk.Entry(f_cprt, textvariable=self.book_copyright, font=("Segoe UI", 9))
+        self.entry_copyright.pack(fill="x")
+
         # CARD 2: Chapter Tweaks & Quality Settings
         tweaks_card = ttk.LabelFrame(main_container, text=" 2. Chapter Tweaks & Audio Quality (Optional) ", padding=12)
         tweaks_card.pack(fill="x", pady=6)
@@ -461,6 +500,9 @@ class PlayawayStudioGUI(tk.Tk):
         cb_subchap = ttk.Checkbutton(col1, text="Enable Subchapters (AF*)", variable=self.subchapter_mode, command=self.update_estimates)
         cb_subchap.pack(anchor="w", pady=(4, 0))
 
+        cb_intro = ttk.Checkbutton(col1, text="1st Track is Intro (Part 00)", variable=self.intro_offset_mode, command=self.update_estimates)
+        cb_intro.pack(anchor="w", pady=(2, 0))
+
         # Column 2: Playback & Hardware Tweaks Sub-Card
         col2 = ttk.LabelFrame(tweak_grid, text=" 🎛️ Playback & Hardware ", padding=8)
         col2.pack(side="left", fill="both", expand=True, padx=4)
@@ -484,7 +526,17 @@ class PlayawayStudioGUI(tk.Tk):
         cb_pitch.pack(anchor="w", pady=(2, 4))
 
         cb_silence = ttk.Checkbutton(col2, text="Add 5s End Silence (Firmware Fix)", variable=self.final_chapter_silence, command=self.on_silence_toggle)
-        cb_silence.pack(anchor="w", pady=(0, 2))
+        cb_silence.pack(anchor="w", pady=(0, 4))
+
+        # PATWEAKS.DAT Hardware Config Button & Preview
+        pat_btn_frame = ttk.Frame(col2, style="Card.TFrame")
+        pat_btn_frame.pack(anchor="w", fill="x", pady=(2, 0))
+
+        btn_patweaks = ttk.Button(pat_btn_frame, text="⚙️ PATWEAKS.DAT Options...", command=self.open_patweaks_dialog)
+        btn_patweaks.pack(side="left", fill="x", expand=True)
+
+        self.lbl_patweaks_preview = ttk.Label(col2, text="Header: AWBVOL082002...", style="Card.TLabel", font=("Consolas", 8), foreground="#89b4fa")
+        self.lbl_patweaks_preview.pack(anchor="w", pady=(2, 0))
 
         # Column 3: Encoding Bitrate & Storage Sub-Card
         col3 = ttk.LabelFrame(tweak_grid, text=" ⚡ Bitrate & Storage ", padding=8)
@@ -548,18 +600,21 @@ class PlayawayStudioGUI(tk.Tk):
 
         self.chapter_tree.bind("<<TreeviewSelect>>", self.on_tree_select)
 
-        # Chapter Actions Toolbar (Exclude / Include, Restore All Tracks, Reset Chapters)
+        # Chapter Actions Toolbar (Enable / Disable, Enable All, Merge Selected, Reset Chapters)
         chap_act_bar = ttk.Frame(info_frame, style="Card.TFrame")
         chap_act_bar.pack(fill="x", pady=(6, 2))
 
-        self.btn_toggle_exclude = ttk.Button(chap_act_bar, text="🗑️ Exclude / Include Track", command=self.toggle_exclude_selected_track)
+        self.btn_toggle_exclude = ttk.Button(chap_act_bar, text="🗑️ Enable / Disable Track", command=self.toggle_exclude_selected_track)
         self.btn_toggle_exclude.pack(side="left", padx=(0, 4))
 
-        self.btn_restore_all = ttk.Button(chap_act_bar, text="🔄 Restore All Tracks", command=self.restore_all_tracks)
+        self.btn_restore_all = ttk.Button(chap_act_bar, text="🔄 Enable All Tracks", command=self.restore_all_tracks)
         self.btn_restore_all.pack(side="left", padx=4)
 
+        self.btn_merge_tracks = ttk.Button(chap_act_bar, text="🔗 Merge Selected Tracks", command=self.merge_selected_tracks)
+        self.btn_merge_tracks.pack(side="left", padx=4)
+
         self.btn_reload_chapters = ttk.Button(chap_act_bar, text="🔁 Reset Chapters from Source", command=self.reset_chapters_from_source)
-        self.btn_reload_chapters.pack(side="left", padx=4)
+        self.btn_reload_chapters.pack(side="right", padx=(4, 0))
 
         # Embedded LibVLC Media Player Controls
         vlc_container = ttk.LabelFrame(info_frame, text=" 🎧 LibVLC Audio Player ", padding=8)
@@ -936,11 +991,19 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
             self.audio_info = inspect_audio_source(p)
             dur_str = self.audio_info["total_duration_formatted"]
             num_files = len(self.audio_info["files"])
-            title = self.audio_info["title"]
-            self.book_title.set(title)
+            title = self.audio_info.get("title", "")
+            author = self.audio_info.get("author", "")
+            cprt = self.audio_info.get("copyright", "")
 
+            self.book_title.set(title)
+            if author:
+                self.book_author.set(author)
+            if cprt:
+                self.book_copyright.set(cprt)
+
+            author_tag = f" | Author: {author}" if author else ""
             self.info_label.config(
-                text=f"Loaded: '{title}' | Files: {num_files} | Total Duration: {dur_str}",
+                text=f"Loaded: '{title}'{author_tag} | Files: {num_files} | Total Duration: {dur_str}",
                 foreground="#a6e3a1"
             )
             self.update_estimates()
@@ -1036,7 +1099,8 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
                 split_mins=self.split_mins.get(),
                 title=self.book_title.get(),
                 subchapter_mode=self.subchapter_mode.get(),
-                final_chapter_silence=self.final_chapter_silence.get()
+                final_chapter_silence=self.final_chapter_silence.get(),
+                intro_offset_mode=self.intro_offset_mode.get()
             )
 
             # Re-apply excluded states to matching segments
@@ -1046,7 +1110,9 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
                     s["excluded"] = excluded_map[key]
 
         # Active vs total tracks & active duration
+        audio_segments = [s for s in self.planned_segments if not (s.get("is_silence", False) or s.get("file") == "__SILENCE__")]
         active_segments = [s for s in self.planned_segments if not s.get("excluded", False)]
+        active_audio_segments = [s for s in audio_segments if not s.get("excluded", False)]
         active_dur_sec = sum(s.get("duration", 0.0) for s in active_segments)
 
         # Auto-calculate bitrate if Auto-Fit mode is enabled
@@ -1068,8 +1134,8 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
         spd = self.playback_speed.get()
         est_mb = estimate_bitrate_size(active_dur_sec, kbps, speed=spd)
 
-        num_tracks = len(active_segments)
-        ex_count = len(self.planned_segments) - num_tracks
+        num_tracks = len(active_audio_segments)
+        ex_count = len(audio_segments) - num_tracks
         ex_suffix = f" ({ex_count} cut)" if ex_count > 0 else ""
 
         # Capacity check threshold (based on total disk capacity since flashing wipes the drive)
@@ -1083,7 +1149,7 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
             if matching_d:
                 capacity_mb = matching_d.get('total_mb') or matching_d.get('free_mb', 105.0)
 
-        if num_tracks > 999:
+        if len(active_segments) > 999:
             self.estimate_label.config(
                 text=f"Active Tracks: {num_tracks}{ex_suffix} | Estimated Size: ~{est_mb} MB\n⚠️ EXCEEDS FIRMWARE TRACK LIMIT! (Max 999 Tracks)",
                 foreground="#f38ba8",
@@ -1112,7 +1178,7 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
                 self.progress_status_label.config(text="⚠️ Flash Disabled: Size exceeds capacity. Lower bitrate/increase speed or cut tracks.")
         else:
             # SAFE CAPACITY: Check if any single track exceeds 85 mins (Firmware 01:03 limit)
-            has_long_track = any(s.get("duration", 0.0) > 5100.0 for s in active_segments if not s.get("is_silence", False))
+            has_long_track = any(s.get("duration", 0.0) > 5100.0 for s in active_audio_segments)
             warn_str = "\n💡 Tip: Single track > 1h28m detected! Split into 15-60 min tracks to prevent Firmware 01:03 freeze." if has_long_track else ""
 
             self.estimate_label.config(
@@ -1148,8 +1214,9 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
         for item in self.chapter_tree.get_children():
             self.chapter_tree.delete(item)
 
-        active_segments = [s for s in self.planned_segments if not s.get("excluded", False)]
-        excluded_count = len(self.planned_segments) - len(active_segments)
+        audio_segments = [s for s in self.planned_segments if not (s.get("is_silence", False) or s.get("file") == "__SILENCE__")]
+        active_segments = [s for s in audio_segments if not s.get("excluded", False)]
+        excluded_count = len(audio_segments) - len(active_segments)
 
         active_dur_sec = sum(s.get("duration", 0.0) for s in active_segments)
         orig_dur_str = format_duration(active_dur_sec)
@@ -1197,38 +1264,51 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
             "status": len("Status")
         }
 
+        intro_mode = self.intro_offset_mode.get()
         for idx, seg in enumerate(self.planned_segments, 1):
+            is_silence = seg.get("is_silence", False) or seg.get("file") == "__SILENCE__"
+            if is_silence:
+                # Do not display synthetic firmware end silence track in active tracks list
+                continue
+
             raw_title = seg.get("title", "").strip()
+            is_intro = seg.get("is_intro", False) or (intro_mode and idx == 1)
+
             if not raw_title or (raw_title.isdigit() and int(raw_title) == idx):
-                t_title = f"Chapter {idx}"
+                if is_intro:
+                    t_title = "Intro / Opening Credits"
+                elif intro_mode:
+                    t_title = f"Chapter {idx - 1}"
+                else:
+                    t_title = f"Chapter {idx}"
             else:
                 t_title = raw_title
 
-            is_silence = seg.get("is_silence", False) or seg.get("file") == "__SILENCE__"
             is_excluded = seg.get("excluded", False)
 
-            if is_silence:
-                eff_dur_sec = 5.0
-                timeframe_str = "0m 00s -> 0m 05s"
-                length_str = "5s"
-                row_tag = "active"
+            # Calculate speed-adjusted effective durations and timestamps
+            eff_dur_sec = seg.get("duration", 0.0) / max(0.25, spd)
+            eff_start_sec = seg.get("start", 0.0) / max(0.25, spd)
+            eff_end_sec = seg.get("end", 0.0) / max(0.25, spd)
+
+            dur_m = round(eff_dur_sec / 60.0, 1)
+            t_start = format_duration(eff_start_sec)
+            t_end = format_duration(eff_end_sec)
+            timeframe_str = f"{t_start} -> {t_end}"
+
+            if dur_m > MAX_SAFE_TRACK_MINS and not is_excluded:
+                length_str = f"⚠️ {dur_m}m"
+                row_tag = "warning"
             else:
-                # Calculate speed-adjusted effective durations and timestamps
-                eff_dur_sec = seg.get("duration", 0.0) / max(0.25, spd)
-                eff_start_sec = seg.get("start", 0.0) / max(0.25, spd)
-                eff_end_sec = seg.get("end", 0.0) / max(0.25, spd)
+                length_str = f"{dur_m}m"
+                row_tag = "excluded" if is_excluded else "active"
 
-                dur_m = round(eff_dur_sec / 60.0, 1)
-                t_start = format_duration(eff_start_sec)
-                t_end = format_duration(eff_end_sec)
-                timeframe_str = f"{t_start} -> {t_end}"
-
-                if dur_m > MAX_SAFE_TRACK_MINS and not is_excluded:
-                    length_str = f"⚠️ {dur_m}m"
-                    row_tag = "warning"
-                else:
-                    length_str = f"{dur_m}m"
-                    row_tag = "excluded" if is_excluded else "active"
+            if is_intro:
+                idx_str = "000 (Intro)"
+            elif intro_mode:
+                idx_str = f"{idx - 1:03d}"
+            else:
+                idx_str = f"{idx:03d}"
 
             sub_tag = "[AF*] " if self.subchapter_mode.get() else ""
             full_title = f"{sub_tag}{t_title}"
@@ -1265,10 +1345,14 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
             self.chapter_tree.column(col, width=calc_w)
 
         # Restore saved track selection (or default to 1st track if valid)
-        if self.planned_segments:
-            target_idx = min(saved_idx, len(self.planned_segments) - 1)
+        if audio_segments:
+            first_idx = self.planned_segments.index(audio_segments[0])
+            last_idx = self.planned_segments.index(audio_segments[-1])
+            target_idx = max(first_idx, min(saved_idx, last_idx))
             self.chapter_tree.selection_set(str(target_idx))
             self.chapter_tree.see(str(target_idx))
+
+        self.update_patweaks_preview_label()
 
     def restore_all_tracks(self):
         """Re-enable (include) all excluded tracks in the planned segments list."""
@@ -1371,6 +1455,74 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
         self.scrub_pct.set(0.0)
 
         self.log(f"[✂️] Split Track #{idx+1} at {format_duration(scrub_offset)} into '{part1_title}' and '{part2_title}'.")
+
+    def merge_selected_tracks(self):
+        """Merge two adjacent selected tracks in the chapter table into a single continuous track."""
+        if not self.planned_segments:
+            return
+
+        sel = self.chapter_tree.selection()
+        if len(sel) != 2:
+            messagebox.showinfo(
+                "Merge Tracks",
+                "Please select exactly two adjacent tracks in the table to merge (Hold Ctrl or Shift to select both rows)."
+            )
+            return
+
+        idx_a = int(sel[0])
+        idx_b = int(sel[1])
+        if idx_a > idx_b:
+            idx_a, idx_b = idx_b, idx_a
+
+        if idx_b != idx_a + 1:
+            messagebox.showwarning(
+                "Cannot Merge",
+                f"Can only merge two consecutive adjacent tracks (selected Track #{idx_a + 1} and Track #{idx_b + 1})."
+            )
+            return
+
+        seg_a = self.planned_segments[idx_a]
+        seg_b = self.planned_segments[idx_b]
+
+        if seg_a.get("is_silence") or seg_b.get("is_silence"):
+            messagebox.showwarning("Cannot Merge", "Cannot merge the firmware end silence track.")
+            return
+
+        self.stop_audio_preview(log_msg=False)
+
+        title_a = seg_a.get("title", f"Track {idx_a + 1}").strip()
+        title_b = seg_b.get("title", f"Track {idx_b + 1}").strip()
+        default_merged_title = f"{title_a} & {title_b}"
+
+        new_name = simpledialog.askstring(
+            "Merge Tracks",
+            f"Merging adjacent tracks:\n• Track #{idx_a + 1}: {title_a}\n• Track #{idx_b + 1}: {title_b}\n\nEnter title for the merged track:",
+            initialvalue=default_merged_title,
+            parent=self
+        )
+
+        if new_name is None:
+            return
+
+        merged_title = new_name.strip() if new_name.strip() else default_merged_title
+
+        try:
+            self.planned_segments = merge_segments(
+                segments=self.planned_segments,
+                idx_a=idx_a,
+                idx_b=idx_b,
+                new_title=merged_title,
+                clean_title=self.book_title.get(),
+                subchapter_mode=self.subchapter_mode.get(),
+                intro_offset_mode=self.intro_offset_mode.get()
+            )
+            self.update_estimates(replan=False)
+            self.chapter_tree.selection_set(str(idx_a))
+            self.chapter_tree.see(str(idx_a))
+            self.scrub_pct.set(0.0)
+            self.log(f"[🔗] Merged tracks #{idx_a + 1} and #{idx_b + 1} into '{merged_title}'.")
+        except Exception as e:
+            messagebox.showerror("Merge Error", f"Failed to merge tracks: {e}")
 
     def on_tree_select(self, event=None):
         """Reset scrub slider when selecting a new chapter row."""
@@ -1645,26 +1797,26 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
                 pass
 
     def toggle_exclude_selected_track(self):
-        """Toggle excluded state for all selected tracks in the list."""
+        """Toggle disabled/enabled state for all selected tracks in the list."""
         sel = self.chapter_tree.selection()
         if not sel:
-            messagebox.showinfo("Exclude Track", "Please select one or more chapters from the list to exclude/include.")
+            messagebox.showinfo("Enable / Disable Track", "Please select one or more chapters from the list to enable/disable.")
             return
 
         for item in sel:
             idx = int(item)
             curr = self.planned_segments[idx].get("excluded", False)
             self.planned_segments[idx]["excluded"] = not curr
-            action = "Excluded" if not curr else "Restored"
-            self.log(f"[✂️] Track #{idx+1} ({self.planned_segments[idx].get('title', 'Chapter')}) marked as {action}.")
+            action = "Disabled" if not curr else "Enabled"
+            self.log(f"[⚙️] Track #{idx+1} ({self.planned_segments[idx].get('title', 'Chapter')}) marked as {action}.")
 
         self.update_estimates(replan=False)
 
     def restore_all_tracks(self):
-        """Restore all excluded tracks back to active status."""
+        """Enable all disabled tracks back to active status."""
         for seg in self.planned_segments:
             seg["excluded"] = False
-        self.log("[🔄] All excluded tracks restored to active status.")
+        self.log("[🔄] All disabled tracks re-enabled to active status.")
         self.update_estimates(replan=False)
 
     def refresh_drives(self):
@@ -1683,16 +1835,298 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
         self.drive_combo["values"] = options
         self.selected_drive.set("")  # BLANK BY DEFAULT PER USER REQUEST
 
+    def get_patweaks_opts(self):
+        """Return dict of current PATWEAKS options for generator."""
+        return {
+            "subchapter_mode": self.subchapter_mode.get(),
+            "version": self.patweaks_version.get(),
+            "volume": self.patweaks_volume.get(),
+            "speed": self.patweaks_speed.get(),
+            "powerup_profile": self.patweaks_powerup.get(),
+            "backlight_sec": self.patweaks_backlight.get(),
+            "custom_override": self.patweaks_custom.get() if self.patweaks_custom.get().strip() else None
+        }
+
+    def update_patweaks_preview_label(self):
+        """Update live preview snippet shown in main window."""
+        if not hasattr(self, "lbl_patweaks_preview"):
+            return
+        active_segs = [s for s in self.planned_segments if not s.get("excluded", False)] if self.planned_segments else []
+        num_tracks = len(active_segs) or 1
+        opts = self.get_patweaks_opts()
+        pat_str = generate_patweaks_content(num_tracks, **opts).strip()
+        if len(pat_str) > 36:
+            display_str = pat_str[:33] + "..."
+        else:
+            display_str = pat_str
+        self.lbl_patweaks_preview.config(text=f"Header: {display_str}")
+
+    def open_patweaks_dialog(self):
+        """Open comprehensive modal dialog to configure PATWEAKS.DAT hardware parameters."""
+        dlg = tk.Toplevel(self)
+        dlg.title("PATWEAKS.DAT Configuration")
+        dlg.geometry("620x640")
+        dlg.minsize(580, 600)
+        dlg.configure(bg="#1e1e2e")
+        dlg.transient(self)
+        dlg.grab_set()
+
+        # Mapping dictionaries for friendly names <-> underlying values
+        VER_CHOICES = [
+            ("Modern Gen 3/HD (082002)", "082002"),
+            ("Legacy Gen 1/2 (072002)", "072002")
+        ]
+        VOL_CHOICES = [
+            ("90% (Standard / Clear Audio)", 90),
+            ("100% (Maximum Volume)", 100),
+            ("80% (Moderate Volume)", 80),
+            ("70% (Quiet)", 70),
+            ("50% (Half Volume)", 50)
+        ]
+        SPD_CHOICES = [
+            ("1.0x Normal (080)", 80),
+            ("1.1x Faster (090)", 90),
+            ("1.25x Fast (100)", 100),
+            ("0.85x Slower (070)", 70)
+        ]
+        PUP_CHOICES = [
+            ("Standard (5–10 min auto-off + bookmark)", 3),
+            ("Moderate (5 min auto-off)", 2),
+            ("Aggressive (2–3 min battery saver)", 1),
+            ("Always-On / Kiosk (No sleep timeout)", 0)
+        ]
+        BL_CHOICES = [
+            ("Factory Standard (20s)", 20),
+            ("Short (10s)", 10),
+            ("Extended (30s)", 30),
+            ("Minimal (5s)", 5),
+            ("Disabled / Off (0s)", 0)
+        ]
+
+        def _find_label(choices, current_val, fallback_idx=0):
+            for label, val in choices:
+                if val == current_val:
+                    return label
+            return choices[fallback_idx][0]
+
+        def _get_choice_val(choices, selected_label, fallback_val):
+            for label, val in choices:
+                if label == selected_label:
+                    return val
+            return fallback_val
+
+        # Display String Variables for Comboboxes
+        cur_ver = self.patweaks_version.get()
+        cur_vol = self.patweaks_volume.get()
+        cur_spd = self.patweaks_speed.get()
+        cur_pup = self.patweaks_powerup.get()
+        cur_bl = self.patweaks_backlight.get()
+
+        v_ver_label = tk.StringVar(value=_find_label(VER_CHOICES, cur_ver, 0))
+        v_vol_label = tk.StringVar(value=_find_label(VOL_CHOICES, cur_vol, 0))
+        v_spd_label = tk.StringVar(value=_find_label(SPD_CHOICES, cur_spd, 0))
+        v_pup_label = tk.StringVar(value=_find_label(PUP_CHOICES, cur_pup, 0))
+        v_bl_label = tk.StringVar(value=_find_label(BL_CHOICES, cur_bl, 0))
+        v_sub = tk.BooleanVar(value=self.subchapter_mode.get())
+        v_use_custom = tk.BooleanVar(value=bool(self.patweaks_custom.get().strip()))
+        v_custom = tk.StringVar(value=self.patweaks_custom.get())
+
+        content_box = ttk.Frame(dlg, padding=16)
+        content_box.pack(fill="both", expand=True)
+
+        ttk.Label(content_box, text="⚙️ PATWEAKS.DAT Hardware & Header Settings", font=("Segoe UI", 12, "bold"), foreground="#89b4fa").pack(anchor="w", pady=(0, 2))
+        ttk.Label(content_box, text="Configure firmware startup defaults, volume, power profiles, and backlight timers.", font=("Segoe UI", 9, "italic"), foreground="#a6adc8").pack(anchor="w", pady=(0, 8))
+
+        # Main Settings Grid with Color Coded Section
+        grid_frame = ttk.LabelFrame(content_box, text=" Standard Parameters ", padding=12)
+        grid_frame.pack(fill="x", expand=True, pady=(0, 8))
+
+        # Row 0: Revision (Cyan)
+        lbl_rev_dot = tk.Label(grid_frame, text="🔵 Format Revision:", bg="#181825", fg="#89dceb", font=("Segoe UI", 9, "bold"))
+        lbl_rev_dot.grid(row=0, column=0, sticky="w", pady=4)
+        cbo_ver = ttk.Combobox(grid_frame, textvariable=v_ver_label, values=[c[0] for c in VER_CHOICES], state="readonly", width=28)
+        cbo_ver.grid(row=0, column=1, sticky="w", padx=8, pady=4)
+
+        # Row 1: Startup Volume (Green)
+        lbl_vol_dot = tk.Label(grid_frame, text="🟢 Startup Volume:", bg="#181825", fg="#a6e3a1", font=("Segoe UI", 9, "bold"))
+        lbl_vol_dot.grid(row=1, column=0, sticky="w", pady=4)
+        cbo_vol = ttk.Combobox(grid_frame, textvariable=v_vol_label, values=[c[0] for c in VOL_CHOICES], state="readonly", width=28)
+        cbo_vol.grid(row=1, column=1, sticky="w", padx=8, pady=4)
+
+        # Row 2: Startup Speed (Yellow)
+        lbl_spd_dot = tk.Label(grid_frame, text="🟡 Playback Speed:", bg="#181825", fg="#f9e2af", font=("Segoe UI", 9, "bold"))
+        lbl_spd_dot.grid(row=2, column=0, sticky="w", pady=4)
+        cbo_spd = ttk.Combobox(grid_frame, textvariable=v_spd_label, values=[c[0] for c in SPD_CHOICES], state="readonly", width=28)
+        cbo_spd.grid(row=2, column=1, sticky="w", padx=8, pady=4)
+
+        # Row 3: Sleep Profile (Purple)
+        lbl_pup_dot = tk.Label(grid_frame, text="🟣 Sleep Profile:", bg="#181825", fg="#cba6f7", font=("Segoe UI", 9, "bold"))
+        lbl_pup_dot.grid(row=3, column=0, sticky="w", pady=4)
+        cbo_pup = ttk.Combobox(grid_frame, textvariable=v_pup_label, values=[c[0] for c in PUP_CHOICES], state="readonly", width=28)
+        cbo_pup.grid(row=3, column=1, sticky="w", padx=8, pady=4)
+
+        # Row 4: Backlight Timer (Orange)
+        lbl_bl_dot = tk.Label(grid_frame, text="🟠 Backlight Timer:", bg="#181825", fg="#fab387", font=("Segoe UI", 9, "bold"))
+        lbl_bl_dot.grid(row=4, column=0, sticky="w", pady=4)
+        cbo_bl = ttk.Combobox(grid_frame, textvariable=v_bl_label, values=[c[0] for c in BL_CHOICES], state="readonly", width=28)
+        cbo_bl.grid(row=4, column=1, sticky="w", padx=8, pady=4)
+
+        # Row 5: Subchapters (Pink)
+        cb_dlg_sub = ttk.Checkbutton(grid_frame, text="🔴 Enable Subchapters (AF* multi-part navigation)", variable=v_sub)
+        cb_dlg_sub.grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 2))
+
+        # Card: Custom Raw Header Override
+        custom_frame = ttk.LabelFrame(content_box, text=" Advanced Override ", padding=8)
+        custom_frame.pack(fill="x", pady=(0, 8))
+
+        ent_custom = ttk.Entry(custom_frame, textvariable=v_custom, font=("Consolas", 9))
+
+        def _toggle_custom():
+            if v_use_custom.get():
+                ent_custom.config(state="normal")
+            else:
+                ent_custom.config(state="disabled")
+            _update_dlg_preview()
+
+        cb_use_custom = ttk.Checkbutton(custom_frame, text="Use Custom Raw Header (Override automatic string)", variable=v_use_custom, command=_toggle_custom)
+        cb_use_custom.pack(anchor="w", pady=(0, 2))
+        ent_custom.pack(fill="x", expand=True)
+
+        # Color-Coded Live Preview Box
+        prev_card = ttk.LabelFrame(content_box, text=" Live Color-Coded PATWEAKS.DAT Preview ", padding=8)
+        prev_card.pack(fill="x", pady=(0, 8))
+
+        txt_preview = tk.Text(
+            prev_card,
+            height=2,
+            bg="#11111b",
+            fg="#cdd6f4",
+            font=("Consolas", 11, "bold"),
+            wrap="char",
+            relief="flat",
+            padx=10,
+            pady=6
+        )
+        txt_preview.pack(fill="x", expand=True)
+
+        # Configure Color Tags
+        txt_preview.tag_configure("ver", foreground="#89dceb")      # Cyan - Revision
+        txt_preview.tag_configure("sld_tag", foreground="#a6adc8")  # Silver - SLD prefix
+        txt_preview.tag_configure("vol", foreground="#a6e3a1")      # Green - Volume
+        txt_preview.tag_configure("spd", foreground="#f9e2af")      # Yellow - Speed
+        txt_preview.tag_configure("pup", foreground="#cba6f7")      # Purple - Power-Up
+        txt_preview.tag_configure("sub", foreground="#f38ba8")      # Pink - AF* Subchapters
+        txt_preview.tag_configure("bl",  foreground="#fab387")      # Orange - Backlight
+        txt_preview.tag_configure("nmd", foreground="#ffffff")      # Bright White - Track Count
+        txt_preview.tag_configure("custom", foreground="#a6e3a1")   # Mint Green - Custom Override
+
+        # Color Legend Subframe
+        legend_frame = tk.Frame(prev_card, bg="#181825")
+        legend_frame.pack(fill="x", pady=(4, 0))
+
+        tk.Label(legend_frame, text="● Revision", bg="#181825", fg="#89dceb", font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 6))
+        tk.Label(legend_frame, text="● Volume", bg="#181825", fg="#a6e3a1", font=("Segoe UI", 8, "bold")).pack(side="left", padx=6)
+        tk.Label(legend_frame, text="● Speed", bg="#181825", fg="#f9e2af", font=("Segoe UI", 8, "bold")).pack(side="left", padx=6)
+        tk.Label(legend_frame, text="● Sleep", bg="#181825", fg="#cba6f7", font=("Segoe UI", 8, "bold")).pack(side="left", padx=6)
+        tk.Label(legend_frame, text="● Backlight", bg="#181825", fg="#fab387", font=("Segoe UI", 8, "bold")).pack(side="left", padx=6)
+        tk.Label(legend_frame, text="● Subchap", bg="#181825", fg="#f38ba8", font=("Segoe UI", 8, "bold")).pack(side="left", padx=6)
+        tk.Label(legend_frame, text="● Tracks", bg="#181825", fg="#ffffff", font=("Segoe UI", 8, "bold")).pack(side="left", padx=6)
+
+        def _update_dlg_preview(*_):
+            active_segs = [s for s in self.planned_segments if not s.get("excluded", False)] if self.planned_segments else []
+            num_tracks = len(active_segs) or 1
+
+            txt_preview.config(state="normal")
+            txt_preview.delete("1.0", "end")
+
+            if v_use_custom.get() and v_custom.get().strip():
+                clean_custom = v_custom.get().strip().replace("\r", "").replace("\n", "")
+                if "NMD" not in clean_custom.upper():
+                    clean_custom += f"NMD{num_tracks:03d}"
+                txt_preview.insert("end", clean_custom, "custom")
+            else:
+                ver_val = _get_choice_val(VER_CHOICES, v_ver_label.get(), "082002")
+                vol_val = _get_choice_val(VOL_CHOICES, v_vol_label.get(), 90)
+                spd_val = _get_choice_val(SPD_CHOICES, v_spd_label.get(), 80)
+                pup_val = _get_choice_val(PUP_CHOICES, v_pup_label.get(), 3)
+                bl_val = _get_choice_val(BL_CHOICES, v_bl_label.get(), 0)
+                sub_val = v_sub.get()
+
+                # Build color-tagged string components
+                txt_preview.insert("end", f"AWBVOL{ver_val}", "ver")
+                txt_preview.insert("end", "SLD", "sld_tag")
+                txt_preview.insert("end", f"{vol_val:03d}", "vol")
+                txt_preview.insert("end", f"{spd_val:03d}", "spd")
+                txt_preview.insert("end", f"PUP{pup_val:03d}", "pup")
+                if sub_val:
+                    txt_preview.insert("end", "AF*", "sub")
+                if bl_val > 0:
+                    txt_preview.insert("end", f"BLN{bl_val:03d}BLP{bl_val:03d}", "bl")
+                txt_preview.insert("end", f"NMD{num_tracks:03d}", "nmd")
+
+            txt_preview.config(state="disabled")
+
+        for var in (v_ver_label, v_vol_label, v_spd_label, v_pup_label, v_bl_label, v_sub, v_use_custom, v_custom):
+            var.trace_add("write", lambda *_: _update_dlg_preview())
+
+        _toggle_custom()
+        _update_dlg_preview()
+
+        # Bottom Button Bar
+        btn_bar = ttk.Frame(content_box)
+        btn_bar.pack(fill="x")
+
+        def _on_apply():
+            self.patweaks_version.set(_get_choice_val(VER_CHOICES, v_ver_label.get(), "082002"))
+            self.patweaks_volume.set(_get_choice_val(VOL_CHOICES, v_vol_label.get(), 90))
+            self.patweaks_speed.set(_get_choice_val(SPD_CHOICES, v_spd_label.get(), 80))
+            self.patweaks_powerup.set(_get_choice_val(PUP_CHOICES, v_pup_label.get(), 3))
+            self.patweaks_backlight.set(_get_choice_val(BL_CHOICES, v_bl_label.get(), 0))
+            self.subchapter_mode.set(v_sub.get())
+            self.patweaks_custom.set(v_custom.get() if v_use_custom.get() else "")
+            self.update_patweaks_preview_label()
+            self.save_current_settings(quiet=True)
+            self.log("[⚙️] PATWEAKS.DAT options updated and saved.")
+            dlg.destroy()
+
+        def _on_reset():
+            v_ver_label.set(VER_CHOICES[0][0])
+            v_vol_label.set(VOL_CHOICES[0][0])
+            v_spd_label.set(SPD_CHOICES[0][0])
+            v_pup_label.set(PUP_CHOICES[0][0])
+            v_bl_label.set(BL_CHOICES[0][0])
+            v_sub.set(False)
+            v_use_custom.set(False)
+            v_custom.set("")
+            _toggle_custom()
+            _update_dlg_preview()
+
+        btn_apply = ttk.Button(btn_bar, text="✓ Apply & Save", style="Accent.TButton", command=_on_apply)
+        btn_apply.pack(side="right", padx=(4, 0))
+
+        btn_reset_dlg = ttk.Button(btn_bar, text="🔄 Reset Defaults", command=_on_reset)
+        btn_reset_dlg.pack(side="right", padx=4)
+
+        btn_cancel = ttk.Button(btn_bar, text="✖ Cancel", command=dlg.destroy)
+        btn_cancel.pack(side="left")
+
     def save_current_settings(self, quiet=False):
         """Save current GUI tweaks & preferences to playaway_config.json."""
         cfg = {
             "split_mode": self.split_mode.get(),
             "split_mins": self.split_mins.get(),
             "subchapter_mode": self.subchapter_mode.get(),
+            "intro_offset_mode": self.intro_offset_mode.get(),
             "playback_speed": self.playback_speed.get(),
             "preserve_pitch": self.preserve_pitch.get(),
             "final_chapter_silence": self.final_chapter_silence.get(),
-            "bitrate_kbps": "auto" if self.bitrate_is_auto.get() else self.bitrate_kbps.get()
+            "bitrate_kbps": "auto" if self.bitrate_is_auto.get() else self.bitrate_kbps.get(),
+            "patweaks_version": self.patweaks_version.get(),
+            "patweaks_volume": self.patweaks_volume.get(),
+            "patweaks_speed": self.patweaks_speed.get(),
+            "patweaks_powerup": self.patweaks_powerup.get(),
+            "patweaks_backlight": self.patweaks_backlight.get(),
+            "patweaks_custom": self.patweaks_custom.get()
         }
         saved_path = save_config(cfg)
         if not quiet:
@@ -1709,9 +2143,16 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
         self.split_mode.set(cfg.get("split_mode", DEFAULT_SETTINGS["split_mode"]))
         self.split_mins.set(cfg.get("split_mins", DEFAULT_SETTINGS["split_mins"]))
         self.subchapter_mode.set(cfg.get("subchapter_mode", DEFAULT_SETTINGS["subchapter_mode"]))
+        self.intro_offset_mode.set(cfg.get("intro_offset_mode", DEFAULT_SETTINGS.get("intro_offset_mode", False)))
         self.playback_speed.set(cfg.get("playback_speed", DEFAULT_SETTINGS["playback_speed"]))
         self.preserve_pitch.set(cfg.get("preserve_pitch", DEFAULT_SETTINGS["preserve_pitch"]))
         self.final_chapter_silence.set(cfg.get("final_chapter_silence", DEFAULT_SETTINGS.get("final_chapter_silence", True)))
+        self.patweaks_version.set(cfg.get("patweaks_version", DEFAULT_SETTINGS["patweaks_version"]))
+        self.patweaks_volume.set(cfg.get("patweaks_volume", DEFAULT_SETTINGS["patweaks_volume"]))
+        self.patweaks_speed.set(cfg.get("patweaks_speed", DEFAULT_SETTINGS["patweaks_speed"]))
+        self.patweaks_powerup.set(cfg.get("patweaks_powerup", DEFAULT_SETTINGS["patweaks_powerup"]))
+        self.patweaks_backlight.set(cfg.get("patweaks_backlight", DEFAULT_SETTINGS["patweaks_backlight"]))
+        self.patweaks_custom.set(cfg.get("patweaks_custom", DEFAULT_SETTINGS["patweaks_custom"]))
 
         cfg_bit = cfg.get("bitrate_kbps", "auto")
         if str(cfg_bit).lower() == "auto":
@@ -1727,6 +2168,7 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
         spd_str = f"{spd_val}x (Normal)" if spd_val == 1.0 else f"{spd_val}x"
         self.speed_combo.set(spd_str)
         self.update_estimates(replan=True)
+        self.update_patweaks_preview_label()
         self.log("[📂] Loaded saved settings from playaway_config.json.")
         messagebox.showinfo("Settings Loaded", "Loaded saved preferences from playaway_config.json!")
 
@@ -1735,16 +2177,24 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
         self.split_mode.set(DEFAULT_SETTINGS["split_mode"])
         self.split_mins.set(DEFAULT_SETTINGS["split_mins"])
         self.subchapter_mode.set(DEFAULT_SETTINGS["subchapter_mode"])
+        self.intro_offset_mode.set(DEFAULT_SETTINGS.get("intro_offset_mode", False))
         self.playback_speed.set(DEFAULT_SETTINGS["playback_speed"])
         self.preserve_pitch.set(DEFAULT_SETTINGS["preserve_pitch"])
         self.final_chapter_silence.set(DEFAULT_SETTINGS.get("final_chapter_silence", True))
         self.bitrate_is_auto.set(True)
         self.bitrate_kbps.set(10)
+        self.patweaks_version.set(DEFAULT_SETTINGS["patweaks_version"])
+        self.patweaks_volume.set(DEFAULT_SETTINGS["patweaks_volume"])
+        self.patweaks_speed.set(DEFAULT_SETTINGS["patweaks_speed"])
+        self.patweaks_powerup.set(DEFAULT_SETTINGS["patweaks_powerup"])
+        self.patweaks_backlight.set(DEFAULT_SETTINGS["patweaks_backlight"])
+        self.patweaks_custom.set(DEFAULT_SETTINGS["patweaks_custom"])
 
         spd_val = DEFAULT_SETTINGS["playback_speed"]
         spd_str = f"{spd_val}x (Normal)" if spd_val == 1.0 else f"{spd_val}x"
         self.speed_combo.set(spd_str)
         self.update_estimates(replan=True)
+        self.update_patweaks_preview_label()
         self.log("[i] Settings reset to factory defaults.")
 
     def start_backup_thread(self):
@@ -1832,12 +2282,12 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
         self.update_bitrate_label()
         self.update_estimates()
 
-        self.log(f"[+] Auto-Fit Bitrate: Calculated {fit_kbps} kbps based on {storage_source_desc}")
+        self.log(f"[+] Auto-Fit Bitrate: Calculated {fit_kbps} kbps based on {storage_source_desc} (~10MB safety buffer reserved)")
         messagebox.showinfo(
             "Auto-Fit Bitrate Calculated",
             f"Optimal Bitrate: {fit_kbps} kbps\n\n"
             f"Storage Capacity Source:\n• {storage_source_desc}\n\n"
-            f"This automatically selects the highest possible audio quality that will fit your audiobook into {capacity_mb} MB of target storage!"
+            f"This automatically selects the highest audio quality that will fit into {int(capacity_mb)} MB target storage while keeping ~10 MB of free safety space!"
         )
 
     def stop_operation(self):
@@ -1900,12 +2350,21 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
             if not active_segments:
                 raise ValueError("Cannot export: All planned tracks in the list have been excluded!")
 
-            for idx, seg in enumerate(active_segments, 1):
-                track_num = f"{idx:04d}"
-                out_name = f"{track_num} {clean_title} 0000.awb"
-                if self.subchapter_mode.get():
-                    out_name = f"001{idx:03d} {clean_title} 0000.awb"
-                seg["out_name"] = out_name
+            intro_mode = self.intro_offset_mode.get()
+            subchap_mode = self.subchapter_mode.get()
+
+            for idx, seg in enumerate(active_segments):
+                if seg.get("is_silence"):
+                    silence_idx = idx if intro_mode else idx + 1
+                    seg["out_name"] = f"001{silence_idx:03d} {clean_title} 0000.awb" if subchap_mode else f"{silence_idx:04d} {clean_title} 0000.awb"
+                elif intro_mode:
+                    track_num = f"{idx:04d}"
+                    sub_num = f"001{idx:03d}"
+                    seg["out_name"] = f"{sub_num} {clean_title} 0000.awb" if subchap_mode else f"{track_num} {clean_title} 0000.awb"
+                else:
+                    track_num = f"{idx + 1:04d}"
+                    sub_num = f"001{idx + 1:03d}"
+                    seg["out_name"] = f"{sub_num} {clean_title} 0000.awb" if subchap_mode else f"{track_num} {clean_title} 0000.awb"
 
             active_segments[-1]["is_last"] = True
             num_segments = len(active_segments)
@@ -1929,17 +2388,28 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
 
             # Write PATWEAKS.DAT
             pat_file = export_dir / "PATWEAKS.DAT"
-            pat_content = generate_patweaks_content(num_segments, self.subchapter_mode.get())
+            pat_opts = self.get_patweaks_opts()
+            pat_content = generate_patweaks_content(num_segments, **pat_opts)
             with open(pat_file, "wb") as f:
                 f.write(pat_content.encode("ascii"))
             self.log(f"Wrote PATWEAKS.DAT with NMD{num_segments:03d}")
 
             # Write README_HOW_TO_COPY.txt
             readme_file = export_dir / "README_HOW_TO_COPY.txt"
-            readme_text = generate_copy_instructions(clean_title, num_segments)
+            author_val = self.book_author.get().strip()
+            cprt_val = self.book_copyright.get().strip()
+            readme_text = generate_copy_instructions(clean_title, num_segments, author=author_val, copyright_info=cprt_val)
             with open(readme_file, "w", encoding="utf-8") as f:
                 f.write(readme_text)
             self.log("Generated README_HOW_TO_COPY.txt manual copy instructions.")
+
+            # Write COPYRIGHT.TXT (if metadata provided)
+            if author_val or cprt_val:
+                cprt_file = export_dir / "COPYRIGHT.TXT"
+                cprt_text = generate_copyright_file_content(clean_title, author=author_val, copyright_info=cprt_val, track_count=num_segments)
+                with open(cprt_file, "w", encoding="utf-8") as f:
+                    f.write(cprt_text)
+                self.log("Generated COPYRIGHT.TXT metadata.")
 
             self.progress_bar["value"] = 100
             self.progress_status_label.config(text="Export Completed ✓")
@@ -2037,12 +2507,21 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
             if not active_segments:
                 raise ValueError("Cannot flash: All planned tracks in the list have been excluded!")
 
-            for idx, seg in enumerate(active_segments, 1):
-                track_num = f"{idx:04d}"
-                out_name = f"{track_num} {clean_title} 0000.awb"
-                if self.subchapter_mode.get():
-                    out_name = f"001{idx:03d} {clean_title} 0000.awb"
-                seg["out_name"] = out_name
+            intro_mode = self.intro_offset_mode.get()
+            subchap_mode = self.subchapter_mode.get()
+
+            for idx, seg in enumerate(active_segments):
+                if seg.get("is_silence"):
+                    silence_idx = idx if intro_mode else idx + 1
+                    seg["out_name"] = f"001{silence_idx:03d} {clean_title} 0000.awb" if subchap_mode else f"{silence_idx:04d} {clean_title} 0000.awb"
+                elif intro_mode:
+                    track_num = f"{idx:04d}"
+                    sub_num = f"001{idx:03d}"
+                    seg["out_name"] = f"{sub_num} {clean_title} 0000.awb" if subchap_mode else f"{track_num} {clean_title} 0000.awb"
+                else:
+                    track_num = f"{idx + 1:04d}"
+                    sub_num = f"001{idx + 1:03d}"
+                    seg["out_name"] = f"{sub_num} {clean_title} 0000.awb" if subchap_mode else f"{track_num} {clean_title} 0000.awb"
 
             active_segments[-1]["is_last"] = True
             num_segments = len(active_segments)
@@ -2080,7 +2559,11 @@ Note on Battery: Flashing was tested and verified WITHOUT the AAA battery insert
                     track_count=num_segments,
                     subchapter_mode=self.subchapter_mode.get(),
                     log_callback=self.log,
-                    progress_callback=lambda cur, tot, msg: self.progress_bar.config(value=85 + int((cur/tot)*15))
+                    progress_callback=lambda cur, tot, msg: self.progress_bar.config(value=85 + int((cur/tot)*15)),
+                    patweaks_opts=self.get_patweaks_opts(),
+                    book_title=clean_title,
+                    author=self.book_author.get().strip(),
+                    copyright_info=self.book_copyright.get().strip()
                 )
 
                 self.progress_bar["value"] = 100
